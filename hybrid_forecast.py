@@ -102,10 +102,12 @@ def create_features_all(df, is_test=False, train_hist=None):
         df["lag1_x_home"] = df["num_orders_lag_1"] * df["homepage_featured"]
     # --- Target encoding for categorical features ---
     for col in ["category", "cuisine", "center_type"]:
-        if col not in df.columns:
+        ref_df = train_hist if is_test and train_hist is not None else df
+        if col not in df.columns or col not in ref_df.columns:
             continue
-        means = (train_hist if is_test and train_hist is not None else df).groupby(col)["num_orders"].mean()
-        df[f"{col}_target_enc"] = df[col].map(means).fillna((train_hist["num_orders"].mean() if is_test and train_hist is not None else df["num_orders"].mean()) if "num_orders" in (train_hist if is_test and train_hist is not None else df) else 0)
+        means = ref_df.groupby(col)["num_orders"].mean()
+        global_mean = ref_df["num_orders"].mean() if "num_orders" in ref_df else 0
+        df[f"{col}_target_enc"] = df[col].map(means).fillna(global_mean)
     # --- Aggregate features ---
     for col in ["meal_id", "center_id", "category", "cuisine", "center_type"]:
         if col not in df.columns:
