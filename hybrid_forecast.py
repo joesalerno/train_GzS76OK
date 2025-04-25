@@ -113,27 +113,46 @@ def create_features_all(df, is_test=False, train_hist=None):
     # --- Promo recency ---
     for col in ["emailer_for_promotion", "homepage_featured"]:
         if col in df.columns:
-            df[f"weeks_since_{col}"] = df.groupby(group)[col].apply(lambda x: x[::-1].cumsum()[::-1].where(x==1, 0)).reset_index(level=0, drop=True)
+            df[f"weeks_since_{col}"] = (
+                df.groupby(group)[col]
+                .transform(lambda x: x[::-1].cumsum()[::-1].where(x == 1, 0))
+            )
     # --- Holiday/event features ---
     holiday_weeks = set([1, 52, 45, 10, 25])
     df["is_holiday_week"] = df["weekofyear"].isin(holiday_weeks).astype(int)
     df["weeks_to_next_holiday"] = df["weekofyear"].apply(lambda w: min([(h-w)%52 for h in holiday_weeks]))
     # --- Demand volatility/change ---
     for window in [5, 10]:
-        df[f"rolling_volatility_{window}"] = df.groupby(group)["num_orders"].shift(1).rolling(window).std().reset_index(0, drop=True)
-    df["demand_pct_change_1"] = df.groupby(group)["num_orders"].apply(lambda x: x.pct_change().fillna(0))
+        df[f"rolling_volatility_{window}"] = (
+            df.groupby(group)["num_orders"]
+            .transform(lambda x: x.shift(1).rolling(window).std())
+        )
+    df["demand_pct_change_1"] = df.groupby(group)["num_orders"].transform(lambda x: x.pct_change().fillna(0))
     # --- Regime clustering ---
     week_means = (train_hist if is_test and train_hist is not None else df).groupby("weekofyear")["num_orders"].mean()
-    bins = pd.qcut(week_means, 3, labels=["low", "med", "high"])
+    if len(week_means.unique()) >= 3:
+        bins = pd.qcut(week_means, 3, labels=["low", "med", "high"])
+    else:
+        bins = pd.Series(["med"] * len(week_means), index=week_means.index)
     week_regime = dict(zip(week_means.index, bins))
     df["seasonal_regime"] = df["weekofyear"].map(week_regime).astype("category").cat.codes
     # --- One-hot encoding (after rare grouping) ---
     cat_cols = [col for col in ["category", "cuisine", "center_type"] if col in df.columns]
     if cat_cols:
         df = pd.get_dummies(df, columns=cat_cols)
+        # Ensure all dummies present in test match train
+        if is_test and train_hist is not None:
+            train_dummies = [col for col in train_hist.columns if any(col.startswith(prefix) for prefix in ["category_", "cuisine_", "center_type_"])]
+            for col in train_dummies:
+                if col not in df.columns:
+                    df[col] = 0
+            # Reorder columns to match train
+            df = df.reindex(columns=list(df.columns) + [c for c in train_dummies if c not in df.columns], fill_value=0)
     # --- Fill NaNs for all lag/rolling/interaction features ---
     lag_roll_cols = [col for col in df.columns if any(x in col for x in ["lag", "rolling", "diff", "price_diff_x_emailer", "lag1_x_emailer", "price_diff_x_home", "lag1_x_home", "volatility", "demand_pct_change"])]
     df[lag_roll_cols] = df[lag_roll_cols].fillna(0)
+    # --- Final NaN fill for all features ---
+    df.fillna(0, inplace=True)
     return df
 
 # --- Robust feature list builder (prune zero-SHAP features if available) ---
