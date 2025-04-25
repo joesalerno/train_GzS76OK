@@ -4,6 +4,7 @@ from tqdm import tqdm
 from lightgbm import LGBMRegressor
 import lightgbm as lgb
 import matplotlib.pyplot as plt
+import optuna
 
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
@@ -66,7 +67,7 @@ test = pd.get_dummies(test, columns=cat_cols)
 # Align columns between train and test
 df, test = df.align(test, join="left", axis=1, fill_value=0)
 
-# --- FIX: Align train/valid after split to ensure all columns exist ---
+# --- Align train/valid after split to ensure all columns exist ---
 train_df, _ = train_df.align(df, join="right", axis=1, fill_value=0)
 valid_df, _ = valid_df.align(df, join="right", axis=1, fill_value=0)
 
@@ -78,38 +79,61 @@ FEATURES = [
   + [col for col in df.columns if col.startswith("category_") or col.startswith("cuisine_") or col.startswith("center_type_")] \
   + [col for col in df.columns if col in center_info.columns and col != "center_id"]
 
-# Remove duplicates and ensure all features exist in the DataFrame
 FEATURES = list(dict.fromkeys(FEATURES))
 FEATURES = [f for f in FEATURES if f in df.columns and f != "num_orders"]
 
 TARGET = "num_orders"
 
-lgb_params = dict(
-    objective="regression",
-    metric="rmse",
-    learning_rate=0.05,
-    num_leaves=64,
-    random_state=SEED,
-    feature_fraction=0.8,
-    bagging_fraction=0.8,
-    bagging_freq=1,
-    verbose=-1,
-)
+# --- Optuna hyperparameter tuning ---
+def objective(trial):
+    params = {
+        "objective": "regression",
+        "metric": "rmse",
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+        "num_leaves": trial.suggest_int("num_leaves", 31, 256),
+        "feature_fraction": trial.suggest_float("feature_fraction", 0.7, 1.0),
+        "bagging_fraction": trial.suggest_float("bagging_fraction", 0.7, 1.0),
+        "bagging_freq": 1,
+        "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+        "random_state": SEED,
+        "verbose": -1,
+    }
+    model = LGBMRegressor(**params, n_estimators=2000)
+    model.fit(
+        train_df[FEATURES], train_df[TARGET],
+        eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
+        callbacks=[lgb.early_stopping(100, verbose=False)]
+    )
+    preds = model.predict(valid_df[FEATURES])
+    rmse = np.sqrt(np.mean((preds - valid_df[TARGET]) ** 2))
+    return rmse
 
-model = LGBMRegressor(**lgb_params, n_estimators=2000)
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=30)
+print("Best params:", study.best_params)
+
+# Use best params for final model
+best_params = study.best_params
+best_params.update({
+    "objective": "regression",
+    "metric": "rmse",
+    "random_state": SEED,
+    "bagging_freq": 1,
+    "verbose": -1,
+})
+model = LGBMRegressor(**best_params, n_estimators=2000)
 model.fit(
     train_df[FEATURES], train_df[TARGET],
     eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
     callbacks=[lgb.early_stopping(100, verbose=True)],
 )
 
-# --- Add this block to show feature importance ---
+# --- Feature importance plot ---
 plt.figure(figsize=(10, 8))
 lgb.plot_importance(model, max_num_features=30)
 plt.title("LightGBM Feature Importance")
 plt.tight_layout()
 plt.show()
-# --- End block ---
 
 def make_test_features(test, train_hist):
     test_feat = test.copy()
@@ -136,7 +160,6 @@ def make_test_features(test, train_hist):
     return pd.DataFrame(feature_rows)
 
 test_feat = make_test_features(test, df)
-# One-hot encode and align test features only if needed
 existing_cat_cols = [col for col in cat_cols if col in test_feat.columns]
 if existing_cat_cols:
     test_feat = pd.get_dummies(test_feat, columns=existing_cat_cols)
