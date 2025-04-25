@@ -5,6 +5,7 @@ from lightgbm import LGBMRegressor
 import lightgbm as lgb
 import matplotlib.pyplot as plt
 import optuna
+from sklearn.model_selection import KFold
 
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
@@ -14,6 +15,8 @@ FORECAST_HORIZON = 10
 LAG_WEEKS = [1, 2, 3, 5, 10]
 ROLLING_WINDOWS = [3, 5, 10]
 SEED = 42
+OPTUNA_STORAGE = "sqlite:///optuna_lgbm.db"
+OPTUNA_STUDY_NAME = "lgbm_forecast"
 
 # Load main data
 df = pd.read_csv(DATA_PATH).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
@@ -48,10 +51,6 @@ def create_features(df):
 
 df = create_features(df).dropna().reset_index(drop=True)
 
-max_week = df["week"].max()
-train_df = df[df["week"] <= max_week - FORECAST_HORIZON].copy()
-valid_df = df[df["week"] > max_week - FORECAST_HORIZON].copy()
-
 # Add new features from meal_info and center_info
 cat_cols = []
 if "category" in df.columns:
@@ -67,10 +66,6 @@ test = pd.get_dummies(test, columns=cat_cols)
 # Align columns between train and test
 df, test = df.align(test, join="left", axis=1, fill_value=0)
 
-# --- Align train/valid after split to ensure all columns exist ---
-train_df, _ = train_df.align(df, join="right", axis=1, fill_value=0)
-valid_df, _ = valid_df.align(df, join="right", axis=1, fill_value=0)
-
 FEATURES = [
     "center_id", "meal_id", "checkout_price", "base_price",
     "emailer_for_promotion", "homepage_featured",
@@ -84,7 +79,7 @@ FEATURES = [f for f in FEATURES if f in df.columns and f != "num_orders"]
 
 TARGET = "num_orders"
 
-# --- Optuna hyperparameter tuning ---
+# --- Optuna hyperparameter tuning with KFold and more params ---
 def objective(trial):
     params = {
         "objective": "regression",
@@ -95,21 +90,38 @@ def objective(trial):
         "bagging_fraction": trial.suggest_float("bagging_fraction", 0.7, 1.0),
         "bagging_freq": 1,
         "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+        "lambda_l1": trial.suggest_float("lambda_l1", 0, 5),
+        "lambda_l2": trial.suggest_float("lambda_l2", 0, 5),
+        "max_depth": trial.suggest_int("max_depth", 3, 12),
+        "min_split_gain": trial.suggest_float("min_split_gain", 0, 1),
+        "subsample_for_bin": trial.suggest_int("subsample_for_bin", 20000, 300000),
         "random_state": SEED,
         "verbose": -1,
     }
-    model = LGBMRegressor(**params, n_estimators=2000)
-    model.fit(
-        train_df[FEATURES], train_df[TARGET],
-        eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
-        callbacks=[lgb.early_stopping(100, verbose=False)]
-    )
-    preds = model.predict(valid_df[FEATURES])
-    rmse = np.sqrt(np.mean((preds - valid_df[TARGET]) ** 2))
-    return rmse
+    kf = KFold(n_splits=5, shuffle=True, random_state=SEED)
+    rmses = []
+    for train_idx, valid_idx in kf.split(df):
+        X_train, X_valid = df.iloc[train_idx][FEATURES], df.iloc[valid_idx][FEATURES]
+        y_train, y_valid = df.iloc[train_idx][TARGET], df.iloc[valid_idx][TARGET]
+        model = LGBMRegressor(**params, n_estimators=2000)
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_valid, y_valid)],
+            callbacks=[lgb.early_stopping(100, verbose=False)]
+        )
+        preds = model.predict(X_valid)
+        rmses.append(np.sqrt(np.mean((preds - y_valid) ** 2)))
+    return np.mean(rmses)
 
-study = optuna.create_study(direction="minimize")
-study.optimize(objective, n_trials=30)
+# Resume or create Optuna study
+try:
+    study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_STORAGE)
+    print("Loaded existing Optuna study.")
+except Exception:
+    study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_STORAGE)
+    print("Created new Optuna study.")
+
+study.optimize(objective, n_trials=100)  # Increase trials for better search
 print("Best params:", study.best_params)
 
 # Use best params for final model
@@ -121,6 +133,13 @@ best_params.update({
     "bagging_freq": 1,
     "verbose": -1,
 })
+# Use last 10 weeks for validation as before
+max_week = df["week"].max()
+train_df = df[df["week"] <= max_week - FORECAST_HORIZON].copy()
+valid_df = df[df["week"] > max_week - FORECAST_HORIZON].copy()
+train_df, _ = train_df.align(df, join="right", axis=1, fill_value=0)
+valid_df, _ = valid_df.align(df, join="right", axis=1, fill_value=0)
+
 model = LGBMRegressor(**best_params, n_estimators=2000)
 model.fit(
     train_df[FEATURES], train_df[TARGET],
