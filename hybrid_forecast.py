@@ -44,9 +44,10 @@ def create_features_all(df, is_test=False, train_hist=None):
     group = ["center_id", "meal_id"]
     # --- Rare category grouping ---
     for col in ["category", "cuisine", "center_type"]:
-        if col in df.columns:
-            rare = get_rare_categories(train_hist if is_test and train_hist is not None else df, col, min_count=100)
-            df[col] = df[col].apply(lambda x: "Rare" if x in rare else x)
+        if col not in df.columns:
+            continue
+        rare = get_rare_categories(train_hist if is_test and train_hist is not None else df, col, min_count=100)
+        df[col] = df[col].apply(lambda x: "Rare" if x in rare else x)
     # --- Lags, rollings, price, promo, interactions (as before) ---
     if is_test and train_hist is not None:
         # Row-wise for test, using train_hist for lags/rollings
@@ -99,14 +100,20 @@ def create_features_all(df, is_test=False, train_hist=None):
         df["lag1_x_home"] = df["num_orders_lag_1"] * df["homepage_featured"]
     # --- Target encoding for categorical features ---
     for col in ["category", "cuisine", "center_type"]:
-        if col in df.columns:
-            means = (train_hist if is_test and train_hist is not None else df).groupby(col)["num_orders"].mean()
-            df[f"{col}_target_enc"] = df[col].map(means).fillna(df["num_orders"].mean() if "num_orders" in df else 0)
+        if col not in df.columns:
+            continue
+        means = (train_hist if is_test and train_hist is not None else df).groupby(col)["num_orders"].mean()
+        df[f"{col}_target_enc"] = df[col].map(means).fillna((train_hist["num_orders"].mean() if is_test and train_hist is not None else df["num_orders"].mean()) if "num_orders" in (train_hist if is_test and train_hist is not None else df) else 0)
     # --- Aggregate features ---
     for col in ["meal_id", "center_id", "category", "cuisine", "center_type"]:
-        if col in df.columns:
-            for stat in ["mean", "median", "std"]:
-                df[f"{col}_orders_{stat}"] = (train_hist if is_test and train_hist is not None else df).groupby(col)["num_orders"].transform(stat) if not is_test else df[col].map((train_hist if train_hist is not None else df).groupby(col)["num_orders"].agg(stat)).fillna(0)
+        if col not in df.columns:
+            continue
+        for stat in ["mean", "median", "std"]:
+            if not is_test:
+                df[f"{col}_orders_{stat}"] = df.groupby(col)["num_orders"].transform(stat)
+            else:
+                agg_map = (train_hist if train_hist is not None else df).groupby(col)["num_orders"].agg(stat)
+                df[f"{col}_orders_{stat}"] = df[col].map(agg_map).fillna(0)
     # --- Cyclical time features ---
     df["weekofyear"] = df["week"] % 52
     df = cyclical_encode(df, "weekofyear", 52)
