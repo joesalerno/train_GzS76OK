@@ -5,12 +5,15 @@ import optuna
 import shap
 import matplotlib.pyplot as plt
 from sklearn.model_selection import GroupKFold
+import random
 
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
+np.random.seed(SEED)
+random.seed(SEED)
 LAG_WEEKS = [1, 2, 3, 5, 10]
 ROLLING_WINDOWS = [3, 5, 10]
 TARGET = "num_orders"
@@ -111,6 +114,7 @@ def rmsle(y_true, y_pred):
     y_pred = np.array(y_pred)
     return np.sqrt(np.mean(np.square(np.log1p(y_pred.clip(0)) - np.log1p(y_true.clip(0)))))
 
+
 def lgb_rmsle(y_true, y_pred):
     rmsle_score = rmsle(y_true, y_pred)
     return 'rmsle', rmsle_score, False
@@ -136,8 +140,8 @@ def get_lgbm(params=None):
     return LGBMRegressor(**default_params)
 
 # --- Unified Optuna feature+hyperparameter selection with CV ---
-def optuna_feature_selection_cv(train_df, features, target, n_trials=30):
-    import optuna
+def optuna_feature_selection_cv(train_df, features, target, n_trials=500):
+    from optuna.pruners import SuccessiveHalvingPruner
     OPTUNA_DB = "sqlite:///optuna_hybrid_optuna.db"
     OPTUNA_STUDY_NAME = "hybrid_optuna_feature_selection"
     def objective(trial):
@@ -154,6 +158,7 @@ def optuna_feature_selection_cv(train_df, features, target, n_trials=30):
             'lambda_l1': trial.suggest_float('lambda_l1', 1e-3, 10.0, log=True),
             'lambda_l2': trial.suggest_float('lambda_l2', 1e-3, 10.0, log=True),
             'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'random_state': SEED,
         }
         gkf = GroupKFold(n_splits=3)
         rmsles = []
@@ -164,14 +169,16 @@ def optuna_feature_selection_cv(train_df, features, target, n_trials=30):
             model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], eval_metric=lgb_rmsle)
             preds = model.predict(X_val)
             rmsles.append(rmsle(y_val, preds))
+        trial.report(np.mean(rmsles), step=0)
         return np.mean(rmsles)
     try:
         study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
         print(f"Resuming Optuna study '{OPTUNA_STUDY_NAME}'...")
     except Exception:
-        study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
+        study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB, pruner=SuccessiveHalvingPruner())
         print(f"Created new Optuna study '{OPTUNA_STUDY_NAME}'...")
-    study.optimize(objective, n_trials=n_trials)
+    print(f"Starting Optuna optimization for {n_trials} trials. This may take many hours. You can safely interrupt and resume.")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
     best_trial = study.best_trial
     best_params = {k: v for k, v in best_trial.params.items() if not k.startswith('use_')}
     best_features = [f for f in features if best_trial.params.get(f'use_{f}', True)]
@@ -208,7 +215,7 @@ if __name__ == "__main__":
     valid_df = df[df["week"] > max_week - 8].copy()
     train_df = df[df["week"] <= max_week - 8].copy()
     # Optuna feature+param selection with CV
-    best_params, best_features = optuna_feature_selection_cv(train_df, FEATURES, TARGET, n_trials=30)
+    best_params, best_features = optuna_feature_selection_cv(train_df, FEATURES, TARGET, n_trials=500)
     # Retrain on all data
     full_df = pd.concat([train_df, valid_df], axis=0).reset_index(drop=True)
     final_model = get_lgbm(best_params)
