@@ -6,6 +6,7 @@ import lightgbm as lgb
 import matplotlib.pyplot as plt
 import optuna
 from sklearn.model_selection import KFold
+import shap
 
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
@@ -78,7 +79,6 @@ def create_features(df):
     df["num_orders_diff_2"] = df.groupby(["center_id", "meal_id"])["num_orders"].diff(2)
     df["checkout_price_diff_1"] = df.groupby(["center_id", "meal_id"])["checkout_price"].diff(1)
     # Log transforms
-    df["log_num_orders"] = np.log1p(df["num_orders"])
     df["log_checkout_price"] = np.log1p(df["checkout_price"])
     # Discount features
     df["discount"] = df["base_price"] - df["checkout_price"]
@@ -155,43 +155,56 @@ test = pd.get_dummies(test, columns=cat_cols)
 # Align columns between train and test
 df, test = df.align(test, join="left", axis=1, fill_value=0)
 
-# Build FEATURES list to include all advanced engineered features
+# Zero SHAP features to exclude
+ZERO_SHAP_FEATURES = [
+    'emailer_for_promotion', 'center_type_TYPE_A', 'cuisine_Thai', 'center_type_TYPE_C', 'category_Salad',
+    'category_Seafood', 'category_Biryani', 'category_Extras', 'category_Desert', 'category_Fish',
+    'category_Other Snacks', 'category_Pasta', 'category_Pizza', 'cuisine_is_rare', 'center_type_is_rare',
+    'category_is_rare', 'category_Beverages', 'category_Soup', 'category_Starters', 'cuisine_Continental',
+    'cuisine_Indian', 'quarter_cos', 'quarter_sin', 'quarter', 'is_month_start', 'is_quarter_start',
+    'is_month_end', 'is_quarter_end', 'is_holiday_week'
+]
+
+# Build FEATURES list to include all advanced engineered features, but exclude zero-SHAP features
 FEATURES = [
     "center_id", "meal_id", "checkout_price", "base_price",
-    "emailer_for_promotion", "homepage_featured",
+    "homepage_featured",
     "discount", "discount_pct", "price_diff", "weekofyear"
 ]
 # Add lags and rolling
-FEATURES += [col for col in df.columns if "lag_" in col or "rolling_" in col]
+FEATURES += [col for col in df.columns if ("lag_" in col or "rolling_" in col) and col not in ZERO_SHAP_FEATURES]
 # Add one-hot and target encodings
-FEATURES += [col for col in df.columns if col.startswith("category_") or col.startswith("cuisine_") or col.startswith("center_type_")]
+FEATURES += [col for col in df.columns if (col.startswith("category_") or col.startswith("cuisine_") or col.startswith("center_type_")) and col not in ZERO_SHAP_FEATURES]
 # Add center info columns
-FEATURES += [col for col in df.columns if col in center_info.columns and col != "center_id"]
+FEATURES += [col for col in df.columns if col in center_info.columns and col != "center_id" and col not in ZERO_SHAP_FEATURES]
 # Add advanced engineered features (expanded to include all engineered features)
 FEATURES += [col for col in df.columns if (
-    col.startswith("month") or col.startswith("quarter") or
-    col.startswith("weekofyear_sin") or col.startswith("weekofyear_cos") or
+    col.startswith("month") or col.startswith("weekofyear_sin") or col.startswith("weekofyear_cos") or
     col.startswith("is_month_") or col.startswith("is_quarter_") or
-    col.startswith("is_holiday_") or col.startswith("weeks_to_next_holiday") or
+    col.startswith("weeks_to_next_holiday") or
     col.startswith("demand_pct_change") or col.startswith("volatility") or
     col.startswith("regime") or col.endswith("_x_weekofyear") or
     col.endswith("_is_rare") or col == "seasonal_regime" or
     col.startswith("log_") or col.endswith("_diff_1") or col.endswith("_diff_2") or
     col.startswith("price_ratio") or col.startswith("discount_x_") or col.startswith("promo_x_") or
     col.startswith("cummean_") or col.startswith("cumsum_")
-)]
+) and col not in ZERO_SHAP_FEATURES]
 # Remove duplicates and target
 FEATURES = list(dict.fromkeys(FEATURES))
-FEATURES = [f for f in FEATURES if f in df.columns and f != "num_orders"]
+FEATURES = [f for f in FEATURES if f in df.columns and f != "num_orders" and f not in ZERO_SHAP_FEATURES]
 
 TARGET = "num_orders"
 
 # --- RMSLE metric ---
 def rmsle(y_true, y_pred):
+    y_true = np.clip(y_true, 0, None)
+    y_pred = np.clip(y_pred, 0, None)
     return np.sqrt(np.mean((np.log1p(y_pred) - np.log1p(y_true)) ** 2))
 
 def lgb_rmsle_eval(y_true, y_pred):
-    rmsle_val = np.sqrt(np.mean((np.log1p(np.clip(y_pred, 0, None)) - np.log1p(np.clip(y_true, 0, None))) ** 2))
+    y_true = np.clip(y_true, 0, None)
+    y_pred = np.clip(y_pred, 0, None)
+    rmsle_val = np.sqrt(np.mean((np.log1p(y_pred) - np.log1p(y_true)) ** 2))
     return 'rmsle', rmsle_val, False
 
 # --- Optuna hyperparameter tuning with KFold and more params ---
@@ -200,14 +213,14 @@ def objective(trial):
         "objective": "regression",
         "metric": "None",
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-        "num_leaves": trial.suggest_int("num_leaves", 31, 256),
+        "num_leaves": trial.suggest_int("num_leaves", 10, 64),  # reduced upper bound
         "feature_fraction": trial.suggest_float("feature_fraction", 0.7, 1.0),
         "bagging_fraction": trial.suggest_float("bagging_fraction", 0.7, 1.0),
         "bagging_freq": 1,
-        "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
-        "lambda_l1": trial.suggest_float("lambda_l1", 0, 5),
-        "lambda_l2": trial.suggest_float("lambda_l2", 0, 5),
-        "max_depth": trial.suggest_int("max_depth", 3, 12),
+        "min_child_samples": trial.suggest_int("min_child_samples", 20, 200),
+        "lambda_l1": trial.suggest_float("lambda_l1", 1, 10),  # increased lower/upper bound
+        "lambda_l2": trial.suggest_float("lambda_l2", 1, 10),  # increased lower/upper bound
+        "max_depth": trial.suggest_int("max_depth", 3, 7),    # reduced upper bound
         "min_split_gain": trial.suggest_float("min_split_gain", 0, 1),
         "subsample_for_bin": trial.suggest_int("subsample_for_bin", 20000, 300000),
         "random_state": SEED,
@@ -269,25 +282,18 @@ best_params.update({
     "verbose": -1,
     "device": LGBM_DEVICE,
 })
-# Use last FORECAST_HORIZON weeks per (center_id, meal_id) for validation, rest for training
-
-def get_train_valid_split(df, forecast_horizon):
-    train_idx = []
-    valid_idx = []
-    grouped = df.groupby(["center_id", "meal_id"])
-    for _, group in grouped:
-        group = group.sort_values("week")
-        if len(group) > forecast_horizon:
-            train_idx.extend(group.index[:-forecast_horizon])
-            valid_idx.extend(group.index[-forecast_horizon:])
-        else:
-            # If not enough history, use all for training
-            train_idx.extend(group.index)
-    train_df = df.loc[train_idx].copy()
-    valid_df = df.loc[valid_idx].copy()
+# Use time-based split for generalization
+HOLDOUT_WEEKS = 8
+def get_time_based_train_valid_split(df, holdout_weeks=8):
+    # Find the max week in the data
+    max_week = df['week'].max()
+    # Validation set: all rows in the last `holdout_weeks` weeks
+    valid_df = df[df['week'] > max_week - holdout_weeks].copy()
+    # Training set: all rows before the holdout period
+    train_df = df[df['week'] <= max_week - holdout_weeks].copy()
     return train_df, valid_df
 
-train_df, valid_df = get_train_valid_split(df, FORECAST_HORIZON)
+train_df, valid_df = get_time_based_train_valid_split(df, holdout_weeks=HOLDOUT_WEEKS)
 train_df, _ = train_df.align(df, join="right", axis=1, fill_value=0)
 valid_df, _ = valid_df.align(df, join="right", axis=1, fill_value=0)
 
@@ -323,6 +329,23 @@ feature_importance_df = pd.DataFrame({
 
 print("\nAll feature importances:")
 print(feature_importance_df.to_string(index=False))
+
+# --- SHAP value analysis BEFORE feature elimination ---
+print("\nComputing SHAP values for initial model (before feature elimination)...")
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(valid_df[FEATURES])
+shap.summary_plot(shap_values, valid_df[FEATURES], plot_type="bar", show=True)
+shap.summary_plot(shap_values, valid_df[FEATURES], show=True)
+print("SHAP summary plots displayed. Use these to guide further feature selection.")
+
+# --- Save SHAP values to CSV ---
+shap_importance = np.abs(shap_values).mean(axis=0)
+shap_importance_df = pd.DataFrame({
+    'feature': FEATURES,
+    'mean_abs_shap': shap_importance
+}).sort_values('mean_abs_shap', ascending=False)
+shap_importance_df.to_csv("shap_feature_importances.csv", index=False)
+print("SHAP feature importances saved to shap_feature_importances.csv.")
 
 # --- Automated feature selection by importance threshold ---
 thresholds = [0, 1, 5, 10, 20, 50, 100, 200, 500, 750, 1000, 1500, 2000]
@@ -417,7 +440,6 @@ def make_test_features(test, train_hist):
         feature_row["num_orders_diff_2"] = hist.iloc[-1]["num_orders"] - hist.iloc[-3]["num_orders"] if len(hist) >= 3 else 0
         feature_row["checkout_price_diff_1"] = row["checkout_price"] - hist.iloc[-1]["checkout_price"] if len(hist) >= 1 else 0
         # Log transforms
-        feature_row["log_num_orders"] = np.log1p(hist.iloc[-1]["num_orders"]) if len(hist) >= 1 else 0
         feature_row["log_checkout_price"] = np.log1p(row["checkout_price"])
         # Discount features
         feature_row["discount"] = row["base_price"] - row["checkout_price"]
@@ -490,3 +512,18 @@ submission = test_feat[["id", "num_orders"]].copy()
 submission["id"] = submission["id"].astype(int)
 submission.to_csv("submission.csv", index=False)
 print("submission.csv saved.")
+
+# After final_model is trained and feature importances are logged
+# --- SHAP value analysis ---
+print("\nComputing SHAP values for final model...")
+explainer = shap.TreeExplainer(final_model)
+shap_values = explainer.shap_values(valid_df[FEATURES])
+shap.summary_plot(shap_values, valid_df[FEATURES], plot_type="bar", show=True)
+shap.summary_plot(shap_values, valid_df[FEATURES], show=True)
+print("SHAP summary plots displayed. Use these to guide further feature selection.")
+
+# --- Remove features with zero mean absolute SHAP value ---
+shap_importance_df = pd.read_csv("shap_feature_importances.csv")
+nonzero_shap_features = shap_importance_df[shap_importance_df['mean_abs_shap'] > 0]['feature'].tolist()
+FEATURES = [f for f in FEATURES if f in nonzero_shap_features]
+print(f"Removed features with zero SHAP value. {len(FEATURES)} features remain for selection and training.")
