@@ -156,15 +156,12 @@ test = pd.get_dummies(test, columns=cat_cols)
 df, test = df.align(test, join="left", axis=1, fill_value=0)
 
 # Zero SHAP features to exclude
-ZERO_SHAP_FEATURES = []
-# ZERO_SHAP_FEATURES = [
-#     'emailer_for_promotion', 'center_type_TYPE_A', 'cuisine_Thai', 'center_type_TYPE_C', 'category_Salad',
-#     'category_Seafood', 'category_Biryani', 'category_Extras', 'category_Desert', 'category_Fish',
-#     'category_Other Snacks', 'category_Pasta', 'category_Pizza', 'cuisine_is_rare', 'center_type_is_rare',
-#     'category_is_rare', 'category_Beverages', 'category_Soup', 'category_Starters', 'cuisine_Continental',
-#     'cuisine_Indian', 'quarter_cos', 'quarter_sin', 'quarter', 'is_month_start', 'is_quarter_start',
-#     'is_month_end', 'is_quarter_end', 'is_holiday_week'
-# ]
+ZERO_SHAP_FEATURES = [
+    'cuisine_Italian', 'category_Biryani', 'category_Desert', 'category_Extras', 'category_is_rare',
+    'cuisine_Thai', 'category_Starters', 'cuisine_Continental', 'category_Soup', 'category_Pasta',
+    'category_Other Snacks', 'category_Seafood', 'category_Fish', 'category_Pizza', 'cuisine_is_rare',
+    'center_type_is_rare', 'category_Beverages', 'is_month_start', 'is_quarter_start', 'is_quarter_end'
+]
 
 # Build FEATURES list to include all advanced engineered features, but exclude zero-SHAP features
 FEATURES = [
@@ -524,7 +521,7 @@ shap.summary_plot(shap_values, valid_df[FEATURES], show=True)
 print("SHAP summary plots displayed. Use these to guide further feature selection.")
 
 # --- Remove features with zero mean absolute SHAP value ---
-shap_importance_df = pd.read_csv("shap_feature_importances_final.csv")
+shap_importance_df = pd.read_csv("shap_feature_importances.csv")
 nonzero_shap_features = shap_importance_df[shap_importance_df['mean_abs_shap'] > 0]['feature'].tolist()
 FEATURES = [f for f in FEATURES if f in nonzero_shap_features]
 print(f"Removed features with zero SHAP value. {len(FEATURES)} features remain for selection and training.")
