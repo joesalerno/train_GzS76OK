@@ -29,6 +29,8 @@ df = df.merge(center_info, on="center_id", how="left")
 test = test.merge(center_info, on="center_id", how="left")
 
 def get_rare_categories(df, col, min_count=100):
+    if col not in df.columns:
+        return []
     counts = df[col].value_counts()
     rare = counts[counts < min_count].index.tolist()
     return rare
@@ -222,7 +224,7 @@ def get_lgbm(params=None):
     return LGBMRegressor(**default_params)
 
 # --- Unified Optuna feature+hyperparameter selection with CV ---
-def optuna_feature_selection_cv(train_df, features, target, n_trials=500):
+def optuna_feature_selection_cv(train_df, features, target, n_trials=10):
     from optuna.pruners import SuccessiveHalvingPruner
     OPTUNA_DB = "sqlite:///optuna_hybrid_optuna.db"
     OPTUNA_STUDY_NAME = "hybrid_optuna_feature_selection"
@@ -297,7 +299,7 @@ if __name__ == "__main__":
     valid_df = df[df["week"] > max_week - 8].copy()
     train_df = df[df["week"] <= max_week - 8].copy()
     # Optuna feature+param selection with CV
-    best_params, best_features = optuna_feature_selection_cv(train_df, FEATURES, TARGET, n_trials=500)
+    best_params, best_features = optuna_feature_selection_cv(train_df, FEATURES, TARGET, n_trials=10)
     # Retrain on all data
     full_df = pd.concat([train_df, valid_df], axis=0).reset_index(drop=True)
     final_model = get_lgbm(best_params)
