@@ -48,8 +48,20 @@ center_info = pd.read_csv(CENTER_INFO_PATH)
 df = df.merge(center_info, left_on="center_id", right_on="center_id", how="left")
 test = test.merge(center_info, left_on="center_id", right_on="center_id", how="left")
 
+def get_holiday_weeks():
+    # Example: Add/adjust based on your country/region
+    # Weeks for New Year, Christmas, Diwali, Eid, etc.
+    return set([1, 52, 45, 10, 25])
+
+def get_rare_categories(df, col, min_count=100):
+    counts = df[col].value_counts()
+    rare = counts[counts < min_count].index.tolist()
+    return rare
+
 def create_features(df):
     df = df.copy()
+    # Ensure weekofyear is created first
+    df["weekofyear"] = df["week"] % 52
     # Lags
     for lag in LAG_WEEKS:
         df[f"num_orders_lag_{lag}"] = df.groupby(["center_id", "meal_id"])["num_orders"].shift(lag)
@@ -83,18 +95,50 @@ def create_features(df):
     df["discount_x_promo"] = df["discount"] * df["emailer_for_promotion"]
     df["discount_x_homepage"] = df["discount"] * df["homepage_featured"]
     df["price_ratio"] = df["checkout_price"] / (df["base_price"] + 1e-3)
-    # Week features
-    df["weekofyear"] = df["week"] % 52
-    df["week_sin"] = np.sin(2 * np.pi * df["weekofyear"] / 52)
-    df["week_cos"] = np.cos(2 * np.pi * df["weekofyear"] / 52)
-    # Target encoding for category/cuisine/center_type
+    # --- Enhanced seasonality ---
+    df["month"] = ((df["week"] - 1) // 4 + 1).clip(1, 12)
+    df["quarter"] = ((df["week"] - 1) // 13 + 1).clip(1, 4)
+    # Cyclical encodings
+    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+    df["quarter_sin"] = np.sin(2 * np.pi * df["quarter"] / 4)
+    df["quarter_cos"] = np.cos(2 * np.pi * df["quarter"] / 4)
+    # Fourier series for weekofyear
+    for k in [1, 2, 3]:
+        df[f"weekofyear_sin_{k}"] = np.sin(2 * np.pi * k * df["weekofyear"] / 52)
+        df[f"weekofyear_cos_{k}"] = np.cos(2 * np.pi * k * df["weekofyear"] / 52)
+    # Start/end of month/quarter
+    df["is_month_start"] = (df["week"] % 4 == 1).astype(int)
+    df["is_month_end"] = (df["week"] % 4 == 0).astype(int)
+    df["is_quarter_start"] = (df["week"] % 13 == 1).astype(int)
+    df["is_quarter_end"] = (df["week"] % 13 == 0).astype(int)
+    # --- Holiday/event features ---
+    holiday_weeks = get_holiday_weeks()
+    df["is_holiday_week"] = df["weekofyear"].isin(holiday_weeks).astype(int)
+    df["weeks_to_next_holiday"] = df["weekofyear"].apply(lambda w: min([(h-w)%52 for h in holiday_weeks]))
+    # --- Demand volatility/change ---
+    df["rolling_volatility_5"] = df.groupby(["center_id", "meal_id"])["num_orders"].shift(1).rolling(5).std().reset_index(0, drop=True)
+    df["rolling_volatility_10"] = df.groupby(["center_id", "meal_id"])["num_orders"].shift(1).rolling(10).std().reset_index(0, drop=True)
+    df["demand_pct_change_1"] = df["num_orders_diff_1"] / (df.groupby(["center_id", "meal_id"])["num_orders"].shift(1) + 1e-3)
+    # --- Interactions ---
+    df["price_diff_x_weekofyear"] = df["price_diff"] * df["weekofyear"]
+    df["discount_x_weekofyear"] = df["discount"] * df["weekofyear"]
+    df["promo_x_weekofyear"] = df["emailer_for_promotion"] * df["weekofyear"]
+    # --- Rare category grouping ---
     for col in ["category", "cuisine", "center_type"]:
         if col in df.columns:
-            means = df.groupby(col)["num_orders"].transform("mean")
-            df[f"{col}_target_enc"] = means
+            rare = get_rare_categories(df, col, min_count=100)
+            df[f"{col}_is_rare"] = df[col].isin(rare).astype(int)
+    # --- Regime clustering (simple: high/med/low demand by weekofyear) ---
+    week_means = df.groupby("weekofyear")["num_orders"].mean()
+    bins = pd.qcut(week_means, 3, labels=["low", "med", "high"])
+    week_regime = dict(zip(week_means.index, bins))
+    df["seasonal_regime"] = df["weekofyear"].map(week_regime).astype("category").cat.codes
     return df
 
-df = create_features(df).dropna().reset_index(drop=True)
+# --- Feature engineering ---
+df = create_features(df)
+df = df[df["num_orders"].notna()].reset_index(drop=True)
 
 # Add new features from meal_info and center_info
 cat_cols = []
@@ -111,24 +155,50 @@ test = pd.get_dummies(test, columns=cat_cols)
 # Align columns between train and test
 df, test = df.align(test, join="left", axis=1, fill_value=0)
 
+# Build FEATURES list to include all advanced engineered features
 FEATURES = [
     "center_id", "meal_id", "checkout_price", "base_price",
     "emailer_for_promotion", "homepage_featured",
     "discount", "discount_pct", "price_diff", "weekofyear"
-] + [col for col in df.columns if "lag_" in col or "rolling_" in col] \
-  + [col for col in df.columns if col.startswith("category_") or col.startswith("cuisine_") or col.startswith("center_type_")] \
-  + [col for col in df.columns if col in center_info.columns and col != "center_id"]
-
+]
+# Add lags and rolling
+FEATURES += [col for col in df.columns if "lag_" in col or "rolling_" in col]
+# Add one-hot and target encodings
+FEATURES += [col for col in df.columns if col.startswith("category_") or col.startswith("cuisine_") or col.startswith("center_type_")]
+# Add center info columns
+FEATURES += [col for col in df.columns if col in center_info.columns and col != "center_id"]
+# Add advanced engineered features (expanded to include all engineered features)
+FEATURES += [col for col in df.columns if (
+    col.startswith("month") or col.startswith("quarter") or
+    col.startswith("weekofyear_sin") or col.startswith("weekofyear_cos") or
+    col.startswith("is_month_") or col.startswith("is_quarter_") or
+    col.startswith("is_holiday_") or col.startswith("weeks_to_next_holiday") or
+    col.startswith("demand_pct_change") or col.startswith("volatility") or
+    col.startswith("regime") or col.endswith("_x_weekofyear") or
+    col.endswith("_is_rare") or col == "seasonal_regime" or
+    col.startswith("log_") or col.endswith("_diff_1") or col.endswith("_diff_2") or
+    col.startswith("price_ratio") or col.startswith("discount_x_") or col.startswith("promo_x_") or
+    col.startswith("cummean_") or col.startswith("cumsum_")
+)]
+# Remove duplicates and target
 FEATURES = list(dict.fromkeys(FEATURES))
 FEATURES = [f for f in FEATURES if f in df.columns and f != "num_orders"]
 
 TARGET = "num_orders"
 
+# --- RMSLE metric ---
+def rmsle(y_true, y_pred):
+    return np.sqrt(np.mean((np.log1p(y_pred) - np.log1p(y_true)) ** 2))
+
+def lgb_rmsle_eval(y_true, y_pred):
+    rmsle_val = np.sqrt(np.mean((np.log1p(np.clip(y_pred, 0, None)) - np.log1p(np.clip(y_true, 0, None))) ** 2))
+    return 'rmsle', rmsle_val, False
+
 # --- Optuna hyperparameter tuning with KFold and more params ---
 def objective(trial):
     params = {
         "objective": "regression",
-        "metric": "rmse",
+        "metric": "None",
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
         "num_leaves": trial.suggest_int("num_leaves", 31, 256),
         "feature_fraction": trial.suggest_float("feature_fraction", 0.7, 1.0),
@@ -144,9 +214,9 @@ def objective(trial):
         "verbose": -1,
         "device": LGBM_DEVICE,
     }
-    threshold = trial.suggest_categorical("feature_importance_threshold", [0, 1, 5, 10, 20, 50, 100, 200, 500, 1000, 2000])
+    threshold = trial.suggest_categorical("feature_importance_threshold", [0, 1, 5, 10, 20, 50, 100, 200, 500, 750, 1000, 1500, 2000])
     kf = KFold(n_splits=5, shuffle=True, random_state=SEED)
-    rmses = []
+    rmsles = []
     for train_idx, valid_idx in kf.split(df):
         X_train, X_valid = df.iloc[train_idx][FEATURES], df.iloc[valid_idx][FEATURES]
         y_train, y_valid = df.iloc[train_idx][TARGET], df.iloc[valid_idx][TARGET]
@@ -154,6 +224,7 @@ def objective(trial):
         model.fit(
             X_train, y_train,
             eval_set=[(X_valid, y_valid)],
+            eval_metric=lgb_rmsle_eval,
             callbacks=[lgb.early_stopping(100, verbose=False)]
         )
         # Feature selection by importance
@@ -164,18 +235,18 @@ def objective(trial):
         })
         selected = feature_importance_df[feature_importance_df['importance'] > threshold]['feature'].tolist()
         if not selected:
-            # If no features left, penalize this trial
             return 1e6
         # Retrain with selected features
         model_sel = LGBMRegressor(**params, n_estimators=2000)
         model_sel.fit(
             X_train[selected], y_train,
             eval_set=[(X_valid[selected], y_valid)],
+            eval_metric=lgb_rmsle_eval,
             callbacks=[lgb.early_stopping(100, verbose=False)]
         )
         preds = model_sel.predict(X_valid[selected])
-        rmses.append(np.sqrt(np.mean((preds - y_valid) ** 2)))
-    return np.mean(rmses)
+        rmsles.append(rmsle(y_valid, preds))
+    return np.mean(rmsles)
 
 # Resume or create Optuna study
 try:
@@ -192,23 +263,49 @@ print("Best params:", study.best_params)
 best_params = study.best_params
 best_params.update({
     "objective": "regression",
-    "metric": "rmse",
+    "metric": "None",
     "random_state": SEED,
     "bagging_freq": 1,
     "verbose": -1,
     "device": LGBM_DEVICE,
 })
-# Use last 10 weeks for validation as before
-max_week = df["week"].max()
-train_df = df[df["week"] <= max_week - FORECAST_HORIZON].copy()
-valid_df = df[df["week"] > max_week - FORECAST_HORIZON].copy()
+# Use last FORECAST_HORIZON weeks per (center_id, meal_id) for validation, rest for training
+
+def get_train_valid_split(df, forecast_horizon):
+    train_idx = []
+    valid_idx = []
+    grouped = df.groupby(["center_id", "meal_id"])
+    for _, group in grouped:
+        group = group.sort_values("week")
+        if len(group) > forecast_horizon:
+            train_idx.extend(group.index[:-forecast_horizon])
+            valid_idx.extend(group.index[-forecast_horizon:])
+        else:
+            # If not enough history, use all for training
+            train_idx.extend(group.index)
+    train_df = df.loc[train_idx].copy()
+    valid_df = df.loc[valid_idx].copy()
+    return train_df, valid_df
+
+train_df, valid_df = get_train_valid_split(df, FORECAST_HORIZON)
 train_df, _ = train_df.align(df, join="right", axis=1, fill_value=0)
 valid_df, _ = valid_df.align(df, join="right", axis=1, fill_value=0)
+
+# --- Debug logs after train/valid split ---
+print(f"\n[DEBUG] train_df shape: {train_df.shape}, valid_df shape: {valid_df.shape}")
+print(f"[DEBUG] Number of unique (center_id, meal_id) in train_df: {train_df.groupby(['center_id', 'meal_id']).ngroups}")
+print(f"[DEBUG] Number of unique (center_id, meal_id) in valid_df: {valid_df.groupby(['center_id', 'meal_id']).ngroups}")
+print(f"[DEBUG] Weeks in train_df: min={train_df['week'].min()}, max={train_df['week'].max()}, unique={train_df['week'].nunique()}")
+print(f"[DEBUG] Weeks in valid_df: min={valid_df['week'].min()}, max={valid_df['week'].max()}, unique={valid_df['week'].nunique()}")
+print(f"[DEBUG] Total training rows: {len(train_df)}, Total validation rows: {len(valid_df)}")
+print("[DEBUG] train_df sample:\n", train_df.head())
+print("[DEBUG] valid_df sample:\n", valid_df.head())
 
 model = LGBMRegressor(**best_params, n_estimators=2000)
 model.fit(
     train_df[FEATURES], train_df[TARGET],
     eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
+    eval_metric=lgb_rmsle_eval,
     callbacks=[lgb.early_stopping(100, verbose=True)],
 )
 
@@ -224,13 +321,12 @@ feature_importance_df = pd.DataFrame({
     'importance': importances
 }).sort_values('importance', ascending=False)
 
-# Print all feature importances
 print("\nAll feature importances:")
 print(feature_importance_df.to_string(index=False))
 
 # --- Automated feature selection by importance threshold ---
-thresholds = [0, 1, 5, 10, 20, 50, 100, 200, 500, 1000, 2000]
-best_rmse = float('inf')
+thresholds = [0, 1, 5, 10, 20, 50, 100, 200, 500, 750, 1000, 1500, 2000]
+best_rmsle = float('inf')
 best_threshold = None
 best_features = FEATURES
 results = []
@@ -243,18 +339,19 @@ for thresh in thresholds:
     model_sel.fit(
         train_df[selected], train_df[TARGET],
         eval_set=[(valid_df[selected], valid_df[TARGET])],
+        eval_metric=lgb_rmsle_eval,
         callbacks=[lgb.early_stopping(100, verbose=False)],
     )
     preds = model_sel.predict(valid_df[selected])
-    rmse = np.sqrt(np.mean((preds - valid_df[TARGET]) ** 2))
-    results.append((thresh, rmse, selected))
-    print(f"Threshold {thresh}: {len(selected)} features, Validation RMSE: {rmse:.4f}")
-    if rmse < best_rmse:
-        best_rmse = rmse
+    rmsle_val = rmsle(valid_df[TARGET], preds)
+    results.append((thresh, rmsle_val, selected))
+    print(f"Threshold {thresh}: {len(selected)} features, Validation RMSLE: {rmsle_val:.4f}")
+    if rmsle_val < best_rmsle:
+        best_rmsle = rmsle_val
         best_threshold = thresh
         best_features = selected
 
-print(f"\nBest threshold: {best_threshold} (Validation RMSE: {best_rmse:.4f})")
+print(f"\nBest threshold: {best_threshold} (Validation RMSLE: {best_rmsle:.4f})")
 print(f"Features kept ({len(best_features)}): {best_features}")
 
 # Use best_features for final prediction
@@ -265,6 +362,7 @@ final_model = LGBMRegressor(**best_params, n_estimators=2000)
 final_model.fit(
     train_df[FEATURES], train_df[TARGET],
     eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
+    eval_metric=lgb_rmsle_eval,
     callbacks=[lgb.early_stopping(100, verbose=True)],
 )
 
@@ -282,7 +380,6 @@ feature_importance_df = pd.DataFrame({
     'importance': importances
 }).sort_values('importance', ascending=False)
 
-# Print all feature importances
 print("\nAll feature importances:")
 print(feature_importance_df.to_string(index=False))
 
@@ -294,10 +391,16 @@ def make_test_features(test, train_hist):
     test_feat = test.copy()
     test_feat["num_orders"] = np.nan
     feature_rows = []
+    holiday_weeks = get_holiday_weeks()
+    week_means = train_hist.groupby("weekofyear")["num_orders"].mean()
+    bins = pd.qcut(week_means, 3, labels=["low", "med", "high"])
+    week_regime = dict(zip(week_means.index, bins))
     for _, row in tqdm(test_feat.iterrows(), total=len(test_feat), desc="Building test features"):
         cid, mid, week = row["center_id"], row["meal_id"], row["week"]
         hist = train_hist[(train_hist["center_id"] == cid) & (train_hist["meal_id"] == mid) & (train_hist["week"] < week)].sort_values("week")
         feature_row = row.copy()
+        # Restore weekofyear feature
+        feature_row["weekofyear"] = row["week"] % 52
         # Lags
         for lag in LAG_WEEKS:
             feature_row[f"num_orders_lag_{lag}"] = hist.iloc[-lag]["num_orders"] if len(hist) >= lag else (hist["num_orders"].mean() if len(hist) > 0 else 0)
@@ -331,10 +434,42 @@ def make_test_features(test, train_hist):
         feature_row["discount_x_promo"] = feature_row["discount"] * row["emailer_for_promotion"]
         feature_row["discount_x_homepage"] = feature_row["discount"] * row["homepage_featured"]
         feature_row["price_ratio"] = row["checkout_price"] / (row["base_price"] + 1e-3)
-        # Week features
-        feature_row["weekofyear"] = row["week"] % 52
-        feature_row["week_sin"] = np.sin(2 * np.pi * feature_row["weekofyear"] / 52)
-        feature_row["week_cos"] = np.cos(2 * np.pi * feature_row["weekofyear"] / 52)
+        # --- Enhanced seasonality ---
+        feature_row["month"] = ((row["week"] - 1) // 4 + 1)
+        feature_row["quarter"] = ((row["week"] - 1) // 13 + 1)
+        feature_row["month_sin"] = np.sin(2 * np.pi * feature_row["month"] / 12)
+        feature_row["month_cos"] = np.cos(2 * np.pi * feature_row["month"] / 12)
+        feature_row["quarter_sin"] = np.sin(2 * np.pi * feature_row["quarter"] / 4)
+        feature_row["quarter_cos"] = np.cos(2 * np.pi * feature_row["quarter"] / 4)
+        for k in [1, 2, 3]:
+            feature_row[f"weekofyear_sin_{k}"] = np.sin(2 * np.pi * k * feature_row["weekofyear"] / 52)
+            feature_row[f"weekofyear_cos_{k}"] = np.cos(2 * np.pi * k * feature_row["weekofyear"] / 52)
+        feature_row["is_month_start"] = int(row["week"] % 4 == 1)
+        feature_row["is_month_end"] = int(row["week"] % 4 == 0)
+        feature_row["is_quarter_start"] = int(row["week"] % 13 == 1)
+        feature_row["is_quarter_end"] = int(row["week"] % 13 == 0)
+        # --- Holiday/event features ---
+        feature_row["is_holiday_week"] = int(feature_row["weekofyear"] in holiday_weeks)
+        feature_row["weeks_to_next_holiday"] = min([(h-feature_row["weekofyear"])%52 for h in holiday_weeks])
+        # --- Demand volatility/change ---
+        vals5 = hist["num_orders"].iloc[-5:] if len(hist) >= 5 else hist["num_orders"]
+        vals10 = hist["num_orders"].iloc[-10:] if len(hist) >= 10 else hist["num_orders"]
+        feature_row["rolling_volatility_5"] = vals5.std() if len(vals5) > 1 else 0
+        feature_row["rolling_volatility_10"] = vals10.std() if len(vals10) > 1 else 0
+        feature_row["demand_pct_change_1"] = (hist.iloc[-1]["num_orders"] - hist.iloc[-2]["num_orders"]) / (hist.iloc[-2]["num_orders"] + 1e-3) if len(hist) >= 2 else 0
+        # --- Interactions ---
+        feature_row["price_diff_x_weekofyear"] = feature_row["price_diff"] * feature_row["weekofyear"]
+        feature_row["discount_x_weekofyear"] = feature_row["discount"] * feature_row["weekofyear"]
+        feature_row["promo_x_weekofyear"] = row["emailer_for_promotion"] * feature_row["weekofyear"]
+        # --- Rare category grouping ---
+        for col in ["category", "cuisine", "center_type"]:
+            if col in row and col in train_hist.columns:
+                rare = get_rare_categories(train_hist, col, min_count=100)
+                feature_row[f"{col}_is_rare"] = int(row[col] in rare)
+        # --- Regime clustering ---
+        regime_label = week_regime.get(feature_row["weekofyear"], "med")
+        regime_map = {"low": 0, "med": 1, "high": 2}
+        feature_row["seasonal_regime"] = regime_map.get(regime_label, 1)
         # Target encoding for category/cuisine/center_type
         for col in ["category", "cuisine", "center_type"]:
             if col in row and col in train_hist.columns:
