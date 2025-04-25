@@ -6,6 +6,7 @@ import lightgbm as lgb
 import matplotlib.pyplot as plt
 import optuna
 from sklearn.model_selection import KFold
+import os
 
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
@@ -17,6 +18,22 @@ ROLLING_WINDOWS = [3, 5, 10]
 SEED = 42
 OPTUNA_STORAGE = "sqlite:///optuna_lgbm.db"
 OPTUNA_STUDY_NAME = "lgbm_forecast"
+
+# --- Detect GPU support for LightGBM ---
+def detect_lgbm_device():
+    try:
+        # Try to train a tiny model with device='gpu'
+        X = np.random.rand(100, 10)
+        y = np.random.rand(100)
+        test_model = LGBMRegressor(device='gpu', n_estimators=1)
+        test_model.fit(X, y)
+        print("LightGBM GPU support detected. Using GPU.")
+        return "gpu"
+    except Exception:
+        print("LightGBM GPU support not detected. Using CPU.")
+        return "cpu"
+
+LGBM_DEVICE = detect_lgbm_device()
 
 # Load main data
 df = pd.read_csv(DATA_PATH).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
@@ -97,6 +114,7 @@ def objective(trial):
         "subsample_for_bin": trial.suggest_int("subsample_for_bin", 20000, 300000),
         "random_state": SEED,
         "verbose": -1,
+        "device": LGBM_DEVICE,
     }
     kf = KFold(n_splits=5, shuffle=True, random_state=SEED)
     rmses = []
@@ -121,7 +139,7 @@ except Exception:
     study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_STORAGE)
     print("Created new Optuna study.")
 
-study.optimize(objective, n_trials=100)  # Increase trials for better search
+study.optimize(objective, n_trials=100)
 print("Best params:", study.best_params)
 
 # Use best params for final model
@@ -132,6 +150,7 @@ best_params.update({
     "random_state": SEED,
     "bagging_freq": 1,
     "verbose": -1,
+    "device": LGBM_DEVICE,
 })
 # Use last 10 weeks for validation as before
 max_week = df["week"].max()
