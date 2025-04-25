@@ -3,6 +3,8 @@ import numpy as np
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import train_test_split
 import optuna
+import shap
+import matplotlib.pyplot as plt
 
 USE_TUNER = True  # Set to False to skip tuning
 
@@ -144,6 +146,37 @@ else:
         eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
         eval_metric="rmse"
     )
+
+# --- SHAP Analysis ---
+print("Calculating SHAP values for old model...")
+shap_sample = train_df[FEATURES].sample(n=min(2000, len(train_df)), random_state=SEED)
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(shap_sample)
+# Save SHAP values to CSV
+shap_df = pd.DataFrame(shap_values, columns=FEATURES)
+shap_df.to_csv("shap_old_values.csv", index=False)
+# Save SHAP feature importances to CSV
+shap_importance = np.abs(shap_values).mean(axis=0)
+shap_importance_df = pd.DataFrame({
+    'feature': FEATURES,
+    'mean_abs_shap': shap_importance
+}).sort_values('mean_abs_shap', ascending=False)
+shap_importance_df.to_csv("shap_old_feature_importances.csv", index=False)
+# Save SHAP summary plot
+plt.figure(figsize=(12, 8))
+shap.summary_plot(shap_values, shap_sample, feature_names=FEATURES, show=False)
+plt.tight_layout()
+plt.savefig("shap_old_summary.png")
+plt.close()
+# Save SHAP top 20 bar plot
+plt.figure(figsize=(10, 6))
+shap_importance_df.head(20).plot.bar(x='feature', y='mean_abs_shap', legend=False)
+plt.title('Top 20 SHAP Feature Importances (Old Model)')
+plt.ylabel('Mean |SHAP value|')
+plt.tight_layout()
+plt.savefig('shap_old_top20.png')
+plt.close()
+print("SHAP analysis for old model saved to shap_old_values.csv, shap_old_feature_importances.csv, shap_old_summary.png, shap_old_top20.png.")
 
 # --- Predict on test set ---
 def make_test_features(test, train_hist):
