@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 SEED = 42
 TARGET = "num_orders"
 VALIDATION_WEEKS = 8
-N_TRIALS = 40
+N_TRIALS = 2
 USE_TUNER = True
 OPTUNA_DB = "sqlite:///optuna_lgbm.db"
 
@@ -276,3 +276,70 @@ report = pd.DataFrame({
 report.to_csv('superior_validation_report.csv', index=False)
 print(f"Validation RMSE: {rmse:.4f}, MAE: {mae:.4f}")
 print("Validation report saved to superior_validation_report.csv.")
+
+# --- Greedy Backward Feature Elimination ---
+def greedy_feature_selection(train_df, valid_df, FEATURES, TARGET, get_lgbm, best_offset):
+    import copy
+    best_features = copy.deepcopy(FEATURES)
+    best_rmse = None
+    improving = True
+    while improving and len(best_features) > 1:
+        improving = False
+        scores = []
+        for f in best_features:
+            trial_features = [x for x in best_features if x != f]
+            model = get_lgbm()
+            model.fit(
+                train_df[trial_features], train_df[TARGET],
+                eval_set=[(valid_df[trial_features], valid_df[TARGET])],
+                eval_metric="rmse",
+                callbacks=[lgb.early_stopping(100, verbose=False)]
+            )
+            preds = model.predict(valid_df[trial_features]) + best_offset
+            rmse = np.sqrt(np.mean((preds - valid_df[TARGET]) ** 2))
+            scores.append((rmse, f))
+        scores.sort()
+        if best_rmse is None:
+            # Initial RMSE with all features
+            model = get_lgbm()
+            model.fit(
+                train_df[best_features], train_df[TARGET],
+                eval_set=[(valid_df[best_features], valid_df[TARGET])],
+                eval_metric="rmse",
+                callbacks=[lgb.early_stopping(100, verbose=False)]
+            )
+            preds = model.predict(valid_df[best_features]) + best_offset
+            best_rmse = np.sqrt(np.mean((preds - valid_df[TARGET]) ** 2))
+        # Try removing the feature that gives the best (lowest) RMSE
+        best_candidate_rmse, feature_to_remove = scores[0]
+        if best_candidate_rmse <= best_rmse:
+            print(f"Removing feature: {feature_to_remove} (RMSE improved from {best_rmse:.4f} to {best_candidate_rmse:.4f})")
+            best_features.remove(feature_to_remove)
+            best_rmse = best_candidate_rmse
+            improving = True
+        else:
+            print(f"No further improvement by removing any single feature. Stopping.")
+    print(f"Best feature set: {best_features}")
+    print(f"Best validation RMSE: {best_rmse:.4f}")
+    return best_features, best_rmse
+
+# --- Run feature selection and retrain final model ---
+best_features, best_rmse = greedy_feature_selection(train_df, valid_df, FEATURES, TARGET, get_lgbm, best_offset)
+final_model = get_lgbm()
+final_model.fit(
+    train_df[best_features], train_df[TARGET],
+    eval_set=[(valid_df[best_features], valid_df[TARGET])],
+    eval_metric="rmse",
+    callbacks=[lgb.early_stopping(100, verbose=False)]
+)
+
+# --- Predict on Test Set with best features ---
+test_feat = make_test_features(test_df, pd.concat([train_df, valid_df]))
+test_feat, _ = test_feat.align(train_df, join="right", axis=1, fill_value=0)
+test_predictions = final_model.predict(test_feat[best_features]) + best_offset
+test_predictions = np.clip(test_predictions, 0, None).round().astype(int)
+
+submission_df = pd.DataFrame({'id': test_feat['id'], TARGET: test_predictions})
+submission_df['id'] = submission_df['id'].astype(int)
+submission_df.to_csv("submission_superior_greedy.csv", index=False)
+print("submission_superior_greedy.csv saved.")

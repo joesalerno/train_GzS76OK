@@ -1,0 +1,29 @@
+feature,mean_abs_shap
+num_orders_lag_1,111.95491983184056
+rolling_mean_10,82.90378971328438
+price_diff_x_emailer,19.551569442774728
+price_diff,15.270024931530468
+emailer_for_promotion,12.424145560746194
+discount_pct,12.173682793081662
+cuisine_Italian,11.96392872280123
+lag1_x_home,11.5767237927529
+price_diff_x_home,9.82110825344669
+lag1_x_emailer,8.552137371319677
+category_Beverages,7.533605131121358
+category_Rice Bowl,6.86796431061436
+cuisine_Thai,4.84474824502336
+category_Pasta,2.64333384637068
+center_type_TYPE_B,1.7635139348736033
+center_type_TYPE_C,1.691034280393062
+homepage_featured,1.5617044328487748
+cuisine_Indian,1.5368829524551126
+category_Seafood,1.0713736702744532
+category_Extras,0.6859844356381891
+category_Salad,0.48836522226266077
+category_Other Snacks,0.32140019933062214
+category_Biryani,0.2981093535156472
+center_type_TYPE_A,0.18391236147871437
+category_Desert,0.08445729364584961
+category_Fish,0.0
+category_Soup,0.0
+category_Starters,0.0

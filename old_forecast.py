@@ -81,6 +81,16 @@ max_week = df["week"].max()
 valid_df = df[df["week"] > max_week - 8].copy()
 train_df = df[df["week"] <= max_week - 8].copy()
 
+# --- RMSLE metric ---
+def rmsle(y_true, y_pred):
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    return np.sqrt(np.mean(np.square(np.log1p(y_pred.clip(0)) - np.log1p(y_true.clip(0)))))
+
+def lgb_rmsle(y_true, y_pred):
+    rmsle_score = rmsle(y_true, y_pred)
+    return 'rmsle', rmsle_score, False
+
 # --- Model training ---
 def get_lgbm(params=None):
     default_params = dict(
@@ -118,14 +128,14 @@ if USE_TUNER:
         model.fit(
             train_df[FEATURES], train_df[TARGET],
             eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
-            eval_metric="rmse",
+            eval_metric=lgb_rmsle,
             callbacks=[
                 lgb.early_stopping(50, verbose=False)
             ]
         )
         preds = model.predict(valid_df[FEATURES])
-        rmse = np.sqrt(np.mean((preds - valid_df[TARGET]) ** 2))
-        return rmse
+        score = rmsle(valid_df[TARGET], preds)
+        return score
 
     import lightgbm as lgb
     study = optuna.create_study(direction="minimize")
@@ -136,7 +146,7 @@ if USE_TUNER:
     model.fit(
         train_df[FEATURES], train_df[TARGET],
         eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
-        eval_metric="rmse",
+        eval_metric=lgb_rmsle,
         callbacks=[lgb.early_stopping(50, verbose=False)]
     )
 else:
@@ -144,8 +154,13 @@ else:
     model.fit(
         train_df[FEATURES], train_df[TARGET],
         eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
-        eval_metric="rmse"
+        eval_metric=lgb_rmsle
     )
+
+# --- Validation RMSLE reporting ---
+preds_valid = model.predict(valid_df[FEATURES])
+val_rmsle = rmsle(valid_df[TARGET], preds_valid)
+print(f"Validation RMSLE: {val_rmsle:.5f}")
 
 # --- SHAP Analysis ---
 print("Calculating SHAP values for old model...")
