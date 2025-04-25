@@ -28,10 +28,26 @@ center_info = pd.read_csv(CENTER_INFO_PATH)
 df = df.merge(center_info, on="center_id", how="left")
 test = test.merge(center_info, on="center_id", how="left")
 
-# --- Utility: Unified feature engineering for train/valid/test ---
+def get_rare_categories(df, col, min_count=100):
+    counts = df[col].value_counts()
+    rare = counts[counts < min_count].index.tolist()
+    return rare
+
+def cyclical_encode(df, col, max_val):
+    df[f"{col}_sin"] = np.sin(2 * np.pi * df[col] / max_val)
+    df[f"{col}_cos"] = np.cos(2 * np.pi * df[col] / max_val)
+    return df
+
+# --- Overhauled feature engineering ---
 def create_features_all(df, is_test=False, train_hist=None):
     df = df.copy()
     group = ["center_id", "meal_id"]
+    # --- Rare category grouping ---
+    for col in ["category", "cuisine", "center_type"]:
+        if col in df.columns:
+            rare = get_rare_categories(train_hist if is_test and train_hist is not None else df, col, min_count=100)
+            df[col] = df[col].apply(lambda x: "Rare" if x in rare else x)
+    # --- Lags, rollings, price, promo, interactions (as before) ---
     if is_test and train_hist is not None:
         # Row-wise for test, using train_hist for lags/rollings
         for lag in LAG_WEEKS:
@@ -81,31 +97,71 @@ def create_features_all(df, is_test=False, train_hist=None):
         df["lag1_x_emailer"] = df["num_orders_lag_1"] * df["emailer_for_promotion"]
         df["price_diff_x_home"] = df["price_diff"] * df["homepage_featured"]
         df["lag1_x_home"] = df["num_orders_lag_1"] * df["homepage_featured"]
-    # Common features
-    df["discount"] = df["base_price"] - df["checkout_price"]
-    df["discount_pct"] = df["discount"] / df["base_price"]
-    # One-hot encoding
+    # --- Target encoding for categorical features ---
+    for col in ["category", "cuisine", "center_type"]:
+        if col in df.columns:
+            means = (train_hist if is_test and train_hist is not None else df).groupby(col)["num_orders"].mean()
+            df[f"{col}_target_enc"] = df[col].map(means).fillna(df["num_orders"].mean() if "num_orders" in df else 0)
+    # --- Aggregate features ---
+    for col in ["meal_id", "center_id", "category", "cuisine", "center_type"]:
+        if col in df.columns:
+            for stat in ["mean", "median", "std"]:
+                df[f"{col}_orders_{stat}"] = (train_hist if is_test and train_hist is not None else df).groupby(col)["num_orders"].transform(stat) if not is_test else df[col].map((train_hist if train_hist is not None else df).groupby(col)["num_orders"].agg(stat)).fillna(0)
+    # --- Cyclical time features ---
+    df["weekofyear"] = df["week"] % 52
+    df = cyclical_encode(df, "weekofyear", 52)
+    # --- Promo recency ---
+    for col in ["emailer_for_promotion", "homepage_featured"]:
+        if col in df.columns:
+            df[f"weeks_since_{col}"] = df.groupby(group)[col].apply(lambda x: x[::-1].cumsum()[::-1].where(x==1, 0)).reset_index(level=0, drop=True)
+    # --- Holiday/event features ---
+    holiday_weeks = set([1, 52, 45, 10, 25])
+    df["is_holiday_week"] = df["weekofyear"].isin(holiday_weeks).astype(int)
+    df["weeks_to_next_holiday"] = df["weekofyear"].apply(lambda w: min([(h-w)%52 for h in holiday_weeks]))
+    # --- Demand volatility/change ---
+    for window in [5, 10]:
+        df[f"rolling_volatility_{window}"] = df.groupby(group)["num_orders"].shift(1).rolling(window).std().reset_index(0, drop=True)
+    df["demand_pct_change_1"] = df.groupby(group)["num_orders"].apply(lambda x: x.pct_change().fillna(0))
+    # --- Regime clustering ---
+    week_means = (train_hist if is_test and train_hist is not None else df).groupby("weekofyear")["num_orders"].mean()
+    bins = pd.qcut(week_means, 3, labels=["low", "med", "high"])
+    week_regime = dict(zip(week_means.index, bins))
+    df["seasonal_regime"] = df["weekofyear"].map(week_regime).astype("category").cat.codes
+    # --- One-hot encoding (after rare grouping) ---
     cat_cols = [col for col in ["category", "cuisine", "center_type"] if col in df.columns]
     if cat_cols:
         df = pd.get_dummies(df, columns=cat_cols)
-    # Fill NaNs for all lag/rolling/interaction features
-    lag_roll_cols = [col for col in df.columns if any(x in col for x in ["lag", "rolling", "diff", "price_diff_x_emailer", "lag1_x_emailer", "price_diff_x_home", "lag1_x_home"])]
+    # --- Fill NaNs for all lag/rolling/interaction features ---
+    lag_roll_cols = [col for col in df.columns if any(x in col for x in ["lag", "rolling", "diff", "price_diff_x_emailer", "lag1_x_emailer", "price_diff_x_home", "lag1_x_home", "volatility", "demand_pct_change"])]
     df[lag_roll_cols] = df[lag_roll_cols].fillna(0)
     return df
 
-# --- Robust feature list builder ---
+# --- Robust feature list builder (prune zero-SHAP features if available) ---
 def get_feature_list(df):
     base = [
         "center_id", "meal_id", "checkout_price", "base_price",
         "homepage_featured", "emailer_for_promotion",
-        "discount", "discount_pct", "price_diff", "weekofyear"
+        "discount", "discount_pct", "price_diff", "weekofyear",
+        "weekofyear_sin", "weekofyear_cos", "is_holiday_week", "weeks_to_next_holiday", "seasonal_regime"
     ]
     base += [f"num_orders_lag_{lag}" for lag in LAG_WEEKS]
     base += [f"rolling_mean_{w}" for w in ROLLING_WINDOWS]
     base += [f"rolling_std_{w}" for w in ROLLING_WINDOWS]
     base += [f"{col}_rolling_sum_3" for col in ["emailer_for_promotion", "homepage_featured"]]
     base += ["price_diff_x_emailer", "lag1_x_emailer", "price_diff_x_home", "lag1_x_home"]
+    base += [f"rolling_volatility_{w}" for w in [5, 10]]
+    base += ["demand_pct_change_1"]
+    base += [f"weeks_since_{col}" for col in ["emailer_for_promotion", "homepage_featured"]]
+    base += [f"{col}_target_enc" for col in ["category", "cuisine", "center_type"] if f"{col}_target_enc" in df.columns]
+    base += [f"{col}_orders_{stat}" for col in ["meal_id", "center_id", "category", "cuisine", "center_type"] for stat in ["mean", "median", "std"] if f"{col}_orders_{stat}" in df.columns]
     base += [col for col in df.columns if any(col.startswith(prefix) for prefix in ["category_", "cuisine_", "center_type_"])]
+    # Prune zero-SHAP features if available
+    try:
+        shap_df = pd.read_csv("shap_hybrid_feature_importances.csv")
+        nonzero_shap = set(shap_df[shap_df['mean_abs_shap'] > 0]['feature'])
+        base = [f for f in base if f in nonzero_shap or not f.startswith(('category_', 'cuisine_', 'center_type_'))]
+    except Exception:
+        pass
     return [f for f in base if f in df.columns]
 
 # --- RMSLE metric ---
