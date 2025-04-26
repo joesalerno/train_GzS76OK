@@ -174,11 +174,14 @@ TARGET = "num_orders"
 # Define potential features (check existence before adding)
 FEATURES = ["week", "checkout_price", "base_price", "homepage_featured", "emailer_for_promotion"]
 FEATURES += [col for col in ["discount", "discount_pct", "price_diff", "weekofyear"] if col in train_df.columns]
-FEATURES += [f"{TARGET}_lag_{lag}" for lag in LAG_WEEKS if f"{TARGET}_lag_{lag}" in train_df.columns]
+# REMOVE lag features:
+# FEATURES += [f"{TARGET}_lag_{lag}" for lag in LAG_WEEKS if f"{TARGET}_lag_{lag}" in train_df.columns]
 FEATURES += [f"{TARGET}_rolling_mean_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_mean_{w}" in train_df.columns]
 FEATURES += [f"{TARGET}_rolling_std_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_std_{w}" in train_df.columns]
 FEATURES += [f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" for col in OTHER_ROLLING_SUM_COLS if f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" in train_df.columns]
-FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_") or col.startswith("lag1_x_")]
+# Remove lag-based interaction features as well
+FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_")]
+# Do NOT include lag1_x_emailer or lag1_x_home
 FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["category_", "cuisine_", "center_type_"])]
 
 # Ensure only existing columns are included (robustness)
