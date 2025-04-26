@@ -6,6 +6,8 @@ import shap
 import matplotlib.pyplot as plt
 import logging
 import lightgbm as lgb  # Added for early stopping callback
+from sklearn.model_selection import KFold
+from sklearn.linear_model import LinearRegression
 
 # --- Configuration ---
 DATA_PATH = "train.csv"
@@ -14,7 +16,7 @@ MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
 LAG_WEEKS = [1, 2, 3, 5, 10] # Lags based on num_orders
-ROLLING_WINDOWS = [2, 3, 5, 10] # Added 2-week rolling window
+ROLLING_WINDOWS = [2, 3, 5, 10, 14, 21] # Added 14 and 21
 # Other features (not directly dependent on recursive prediction)
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
@@ -97,6 +99,40 @@ def create_other_features(df):
 
     return df_out
 
+def create_group_aggregates(df):
+    df_out = df.copy()
+    # Center-level aggregates
+    df_out['center_orders_mean'] = df_out.groupby('center_id')['num_orders'].transform('mean')
+    df_out['center_orders_median'] = df_out.groupby('center_id')['num_orders'].transform('median')
+    df_out['center_orders_std'] = df_out.groupby('center_id')['num_orders'].transform('std')
+    # Meal-level aggregates
+    df_out['meal_orders_mean'] = df_out.groupby('meal_id')['num_orders'].transform('mean')
+    df_out['meal_orders_median'] = df_out.groupby('meal_id')['num_orders'].transform('median')
+    df_out['meal_orders_std'] = df_out.groupby('meal_id')['num_orders'].transform('std')
+    # Category-level aggregates (if available)
+    if 'category' in df_out.columns:
+        df_out['category_orders_mean'] = df_out.groupby('category')['num_orders'].transform('mean')
+        df_out['category_orders_median'] = df_out.groupby('category')['num_orders'].transform('median')
+        df_out['category_orders_std'] = df_out.groupby('category')['num_orders'].transform('std')
+    return df_out
+
+def cyclical_encode(df, col, max_val):
+    df_out = df.copy()
+    df_out[f'{col}_sin'] = np.sin(2 * np.pi * df_out[col] / max_val)
+    df_out[f'{col}_cos'] = np.cos(2 * np.pi * df_out[col] / max_val)
+    return df_out
+
+def create_advanced_interactions(df):
+    df_out = df.copy()
+    # Interactions with rolling_mean_2
+    if 'num_orders_rolling_mean_2' in df_out.columns:
+        df_out['rolling_mean_2_x_discount_pct'] = df_out['num_orders_rolling_mean_2'] * df_out.get('discount_pct', 0)
+        df_out['rolling_mean_2_x_price_diff'] = df_out['num_orders_rolling_mean_2'] * df_out.get('price_diff', 0)
+        df_out['rolling_mean_2_x_weekofyear'] = df_out['num_orders_rolling_mean_2'] * df_out.get('weekofyear', 0)
+        # Polynomial
+        df_out['rolling_mean_2_sq'] = df_out['num_orders_rolling_mean_2'] ** 2
+    return df_out
+
 def create_interaction_features(df):
     """Creates interaction features."""
     df_out = df.copy()
@@ -124,10 +160,13 @@ def apply_feature_engineering(df, is_train=True):
     if is_train or 'num_orders' in df_out.columns:
         df_out = create_lag_rolling_features(df_out)
     df_out = create_other_features(df_out)
+    df_out = create_group_aggregates(df_out)
     df_out = create_interaction_features(df_out)
+    df_out = create_advanced_interactions(df_out)
+    df_out = cyclical_encode(df_out, 'weekofyear', 52)
 
     # Fill NaNs for all engineered features
-    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home"])]
+    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_median", "_std"])]
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns]
     df_out[cols_to_fill] = df_out[cols_to_fill].fillna(0)
 
@@ -159,14 +198,18 @@ train_df = train_df.dropna(subset=['num_orders']).reset_index(drop=True)
 TARGET = "num_orders"
 FEATURES = [
     "checkout_price", "base_price", "homepage_featured", "emailer_for_promotion",
-    "discount", "discount_pct", "price_diff", "weekofyear"
+    "discount", "discount_pct", "price_diff", "weekofyear",
+    # Cyclical encoding
+    "weekofyear_sin", "weekofyear_cos"
 ]
 FEATURES += [f"{TARGET}_rolling_mean_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_mean_{w}" in train_df.columns]
 FEATURES += [f"{TARGET}_rolling_std_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_std_{w}" in train_df.columns]
 FEATURES += [f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" for col in OTHER_ROLLING_SUM_COLS if f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" in train_df.columns]
-# Add all interaction features, including new rolling mean 2 interactions
-# FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_") or col.startswith("lag1_x_") or col.startswith("rolling_mean_2_x_")]
-FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_") or col.startswith("rolling_mean_2_x_")]
+# Add all interaction features, including new rolling mean 2 interactions and advanced interactions
+FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_") or col.startswith("rolling_mean_2_x_") or col.endswith("_sq")]
+# Add group-level aggregates
+FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["center_orders_", "meal_orders_", "category_orders_"])]
+# Add one-hot columns if present
 FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["category_", "cuisine_", "center_type_"])]
 FEATURES = [f for f in FEATURES if f in train_df.columns and f != TARGET and f !='id']
 logging.info(f"Using {len(FEATURES)} features: {FEATURES}")
@@ -412,3 +455,33 @@ except Exception as e:
     logging.error(f"Error during plotting: {e}")
 
 logging.info("Script finished.")
+
+# --- Stacking/Ensembling ---
+def run_stacking(train_df, test_df, FEATURES, TARGET, base_model_params, n_folds=5):
+    """Run KFold stacking with LightGBM as base and LinearRegression as meta-model."""
+    kf = KFold(n_splits=n_folds, shuffle=True, random_state=SEED)
+    oof_preds = np.zeros(len(train_df))
+    test_preds_folds = []
+    for fold, (train_idx, valid_idx) in enumerate(kf.split(train_df)):
+        X_tr, X_val = train_df.iloc[train_idx][FEATURES], train_df.iloc[valid_idx][FEATURES]
+        y_tr, y_val = train_df.iloc[train_idx][TARGET], train_df.iloc[valid_idx][TARGET]
+        model = LGBMRegressor(**base_model_params)
+        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], eval_metric=lgb_rmsle, callbacks=[lgb.early_stopping(100, verbose=False)])
+        oof_preds[valid_idx] = model.predict(X_val)
+        test_preds_folds.append(model.predict(test_df[FEATURES]))
+    test_preds_mean = np.mean(test_preds_folds, axis=0)
+    # Train meta-model
+    meta = LinearRegression()
+    meta.fit(oof_preds.reshape(-1, 1), train_df[TARGET])
+    stacked_test_preds = meta.predict(test_preds_mean.reshape(-1, 1))
+    stacked_test_preds = np.clip(stacked_test_preds, 0, None).round().astype(int)
+    return stacked_test_preds, oof_preds
+
+# --- After main LightGBM model training and before submission ---
+logging.info("Running stacking ensemble...")
+stacked_test_preds, oof_preds = run_stacking(train_df, test_df, FEATURES, TARGET, final_params, n_folds=5)
+final_predictions_df['num_orders_stacked'] = stacked_test_preds
+# Save stacked predictions as a separate submission
+submission_path_stacked = f"{SUBMISSION_FILE_PREFIX}_optuna_stacked.csv"
+final_predictions_df[['id', 'num_orders_stacked']].rename(columns={'num_orders_stacked': 'num_orders'}).to_csv(submission_path_stacked, index=False)
+logging.info(f"Stacked submission file saved to {submission_path_stacked}")
