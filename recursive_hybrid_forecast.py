@@ -16,7 +16,7 @@ MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
 LAG_WEEKS = [1, 2, 3, 5, 10] # Lags based on num_orders
-ROLLING_WINDOWS = [2, 3, 5, 10, 14, 21] # Added 14 and 21
+ROLLING_WINDOWS = [2, 5, 14] # Added 14 and 21
 # Other features (not directly dependent on recursive prediction)
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
@@ -103,16 +103,16 @@ def create_group_aggregates(df):
     df_out = df.copy()
     # Center-level aggregates
     df_out['center_orders_mean'] = df_out.groupby('center_id')['num_orders'].transform('mean')
-    df_out['center_orders_median'] = df_out.groupby('center_id')['num_orders'].transform('median')
+    # df_out['center_orders_median'] = df_out.groupby('center_id')['num_orders'].transform('median')
     df_out['center_orders_std'] = df_out.groupby('center_id')['num_orders'].transform('std')
     # Meal-level aggregates
     df_out['meal_orders_mean'] = df_out.groupby('meal_id')['num_orders'].transform('mean')
-    df_out['meal_orders_median'] = df_out.groupby('meal_id')['num_orders'].transform('median')
+    # df_out['meal_orders_median'] = df_out.groupby('meal_id')['num_orders'].transform('median')
     df_out['meal_orders_std'] = df_out.groupby('meal_id')['num_orders'].transform('std')
     # Category-level aggregates (if available)
     if 'category' in df_out.columns:
         df_out['category_orders_mean'] = df_out.groupby('category')['num_orders'].transform('mean')
-        df_out['category_orders_median'] = df_out.groupby('category')['num_orders'].transform('median')
+        # df_out['category_orders_median'] = df_out.groupby('category')['num_orders'].transform('median')
         df_out['category_orders_std'] = df_out.groupby('category')['num_orders'].transform('std')
     return df_out
 
@@ -166,7 +166,8 @@ def apply_feature_engineering(df, is_train=True):
     df_out = cyclical_encode(df_out, 'weekofyear', 52)
 
     # Fill NaNs for all engineered features
-    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_median", "_std"])]
+    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_std"])]
+    # lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_median", "_std"])]
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns]
     df_out[cols_to_fill] = df_out[cols_to_fill].fillna(0)
 
@@ -431,40 +432,39 @@ try:
 except Exception as e:
     logging.error(f"Error during SHAP analysis: {e}")
 
-def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001):
-    """
-    Prune features by SHAP importance and correlation:
-    - Keep only features with SHAP importance above threshold or in top N.
-    - For highly correlated pairs, keep only the one with higher SHAP importance.
-    """
-    import pandas as pd
-    # Load SHAP importances
-    shap_df = pd.read_csv(shap_importance_path)
-    shap_df = shap_df.set_index('feature')
-    # 1. Keep only top N or above min importance
-    shap_df = shap_df.sort_values('mean_abs_shap', ascending=False)
-    keep_features = set(shap_df.head(shap_top_n).index)
-    keep_features |= set(shap_df[shap_df['mean_abs_shap'] >= shap_min_importance].index)
-    keep_features = [f for f in FEATURES if f in keep_features]
-    # 2. Remove highly correlated features (keep higher SHAP)
-    corr = train_df[keep_features].corr().abs()
-    to_remove = set()
-    for i, f1 in enumerate(keep_features):
-        for f2 in keep_features[i+1:]:
-            if corr.loc[f1, f2] > corr_threshold:
-                # Remove the one with lower SHAP
-                if shap_df.loc[f1, 'mean_abs_shap'] >= shap_df.loc[f2, 'mean_abs_shap']:
-                    to_remove.add(f2)
-                else:
-                    to_remove.add(f1)
-    pruned_features = [f for f in keep_features if f not in to_remove]
-    logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using SHAP and correlation.")
-    return pruned_features
-
-# --- Prune features before training ---
-shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
-FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001)
-logging.info(f"Final pruned feature set: {FEATURES}")
+# def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001):
+#     """
+#     Prune features by SHAP importance and correlation:
+#     - Keep only features with SHAP importance above threshold or in top N.
+#     - For highly correlated pairs, keep only the one with higher SHAP importance.
+#     """
+#     import pandas as pd
+#     # Load SHAP importances
+#     shap_df = pd.read_csv(shap_importance_path)
+#     shap_df = shap_df.set_index('feature')
+#     # 1. Keep only top N or above min importance
+#     shap_df = shap_df.sort_values('mean_abs_shap', ascending=False)
+#     keep_features = set(shap_df.head(shap_top_n).index)
+#     keep_features |= set(shap_df[shap_df['mean_abs_shap'] >= shap_min_importance].index)
+#     keep_features = [f for f in FEATURES if f in keep_features]
+#     # 2. Remove highly correlated features (keep higher SHAP)
+#     corr = train_df[keep_features].corr().abs()
+#     to_remove = set()
+#     for i, f1 in enumerate(keep_features):
+#         for f2 in keep_features[i+1:]:
+#             if corr.loc[f1, f2] > corr_threshold:
+#                 # Remove the one with lower SHAP
+#                 if shap_df.loc[f1, 'mean_abs_shap'] >= shap_df.loc[f2, 'mean_abs_shap']:
+#                     to_remove.add(f2)
+#                 else:
+#                     to_remove.add(f1)
+#     pruned_features = [f for f in keep_features if f not in to_remove]
+#     logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using SHAP and correlation.")
+#     return pruned_features
+# # --- Prune features before training ---
+# shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
+# FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001)
+# logging.info(f"Final pruned feature set: {FEATURES}")
 
 # --- Plotting Example: Actual vs Predicted for Validation Set ---
 logging.info("Generating validation plot...")
