@@ -14,7 +14,7 @@ MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
 LAG_WEEKS = [1, 2, 3, 5, 10] # Lags based on num_orders
-ROLLING_WINDOWS = [3, 5, 10] # Rolling windows based on num_orders
+ROLLING_WINDOWS = [2, 3, 5, 10] # Added 2-week rolling window
 # Other features (not directly dependent on recursive prediction)
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
@@ -105,6 +105,9 @@ def create_interaction_features(df):
         "lag1_x_emailer": ("num_orders_lag_1", "emailer_for_promotion"),
         "price_diff_x_home": ("price_diff", "homepage_featured"),
         "lag1_x_home": ("num_orders_lag_1", "homepage_featured"),
+        # New rolling mean 2 interactions
+        "rolling_mean_2_x_emailer": ("num_orders_rolling_mean_2", "emailer_for_promotion"),
+        "rolling_mean_2_x_home": ("num_orders_rolling_mean_2", "homepage_featured"),
     }
     for name, (feat1, feat2) in interactions.items():
         if feat1 in df_out.columns and feat2 in df_out.columns:
@@ -161,7 +164,9 @@ FEATURES = [
 FEATURES += [f"{TARGET}_rolling_mean_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_mean_{w}" in train_df.columns]
 FEATURES += [f"{TARGET}_rolling_std_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_std_{w}" in train_df.columns]
 FEATURES += [f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" for col in OTHER_ROLLING_SUM_COLS if f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" in train_df.columns]
-FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_")]
+# Add all interaction features, including new rolling mean 2 interactions
+# FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_") or col.startswith("lag1_x_") or col.startswith("rolling_mean_2_x_")]
+FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_") or col.startswith("rolling_mean_2_x_")]
 FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["category_", "cuisine_", "center_type_"])]
 FEATURES = [f for f in FEATURES if f in train_df.columns and f != TARGET and f !='id']
 logging.info(f"Using {len(FEATURES)} features: {FEATURES}")
