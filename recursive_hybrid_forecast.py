@@ -456,32 +456,48 @@ except Exception as e:
 
 logging.info("Script finished.")
 
-# --- Stacking/Ensembling ---
-def run_stacking(train_df, test_df, FEATURES, TARGET, base_model_params, n_folds=5):
-    """Run KFold stacking with LightGBM as base and LinearRegression as meta-model."""
-    kf = KFold(n_splits=n_folds, shuffle=True, random_state=SEED)
-    oof_preds = np.zeros(len(train_df))
-    test_preds_folds = []
-    for fold, (train_idx, valid_idx) in enumerate(kf.split(train_df)):
-        X_tr, X_val = train_df.iloc[train_idx][FEATURES], train_df.iloc[valid_idx][FEATURES]
-        y_tr, y_val = train_df.iloc[train_idx][TARGET], train_df.iloc[valid_idx][TARGET]
-        model = LGBMRegressor(**base_model_params)
-        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], eval_metric=lgb_rmsle, callbacks=[lgb.early_stopping(100, verbose=False)])
-        oof_preds[valid_idx] = model.predict(X_val)
-        test_preds_folds.append(model.predict(test_df[FEATURES]))
-    test_preds_mean = np.mean(test_preds_folds, axis=0)
-    # Train meta-model
-    meta = LinearRegression()
-    meta.fit(oof_preds.reshape(-1, 1), train_df[TARGET])
-    stacked_test_preds = meta.predict(test_preds_mean.reshape(-1, 1))
-    stacked_test_preds = np.clip(stacked_test_preds, 0, None).round().astype(int)
-    return stacked_test_preds, oof_preds
+# --- Recursive Stacking/Ensembling ---
+def recursive_predict(model, train_df, test_df, FEATURES):
+    """Run recursive prediction for a single model."""
+    history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
+    test_weeks = sorted(test_df['week'].unique())
+    for week_num in test_weeks:
+        current_week_mask = history_df['week'] == week_num
+        history_df = apply_feature_engineering(history_df, is_train=False)
+        current_features = history_df.loc[current_week_mask, FEATURES]
+        missing_cols = [col for col in FEATURES if col not in current_features.columns]
+        if missing_cols:
+            for col in missing_cols:
+                current_features[col] = 0
+        current_features = current_features[FEATURES]
+        current_preds = model.predict(current_features)
+        current_preds = np.clip(current_preds, 0, None).round().astype(float)
+        history_df.loc[current_week_mask, 'num_orders'] = current_preds
+    final_predictions = history_df.loc[history_df['id'].isin(test_df['id']), ['id', 'num_orders']].copy()
+    final_predictions['num_orders'] = final_predictions['num_orders'].round().astype(int)
+    final_predictions['id'] = final_predictions['id'].astype(int)
+    return final_predictions.set_index('id')['num_orders']
 
-# --- After main LightGBM model training and before submission ---
-logging.info("Running stacking ensemble...")
-stacked_test_preds, oof_preds = run_stacking(train_df, test_df, FEATURES, TARGET, final_params, n_folds=5)
-final_predictions_df['num_orders_stacked'] = stacked_test_preds
-# Save stacked predictions as a separate submission
-submission_path_stacked = f"{SUBMISSION_FILE_PREFIX}_optuna_stacked.csv"
-final_predictions_df[['id', 'num_orders_stacked']].rename(columns={'num_orders_stacked': 'num_orders'}).to_csv(submission_path_stacked, index=False)
-logging.info(f"Stacked submission file saved to {submission_path_stacked}")
+
+def recursive_ensemble(train_df, test_df, FEATURES, n_models=5):
+    """Train n_models with different seeds, run recursive prediction, and average results."""
+    preds_list = []
+    for i in range(n_models):
+        logging.info(f"Training ensemble model {i+1}/{n_models}...")
+        params = final_params.copy()
+        params['seed'] = SEED + i
+        model = LGBMRegressor(**params)
+        model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
+        preds = recursive_predict(model, train_df, test_df, FEATURES)
+        preds_list.append(preds)
+    # Average predictions
+    ensemble_preds = np.mean(preds_list, axis=0).round().astype(int)
+    return ensemble_preds
+
+# --- Recursive Ensemble Prediction ---
+logging.info("Running recursive ensemble prediction...")
+ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, n_models=5)
+final_predictions_df['num_orders_ensemble'] = ensemble_preds.values
+submission_path_ensemble = f"{SUBMISSION_FILE_PREFIX}_optuna_ensemble.csv"
+final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble, index=False)
+logging.info(f"Ensemble submission file saved to {submission_path_ensemble}")
