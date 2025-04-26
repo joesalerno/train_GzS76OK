@@ -13,8 +13,12 @@ MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
 N_TRIALS = 1
-np.random.seed(SEED)
+
+# Set random seeds for reproducibility (future-proof for numpy)
+import numpy.random as npr
+rng = npr.default_rng(SEED)
 random.seed(SEED)
+
 LAG_WEEKS = [1, 2, 3, 5, 10]
 ROLLING_WINDOWS = [3, 5, 10]
 TARGET = "num_orders"
@@ -335,7 +339,7 @@ if __name__ == "__main__":
     submission.to_csv("submission_hybrid_optuna.csv", index=False)
     print("submission_hybrid_optuna.csv saved.")
     # SHAP analysis
-    shap_sample = full_df[best_features].sample(n=min(2000, len(full_df)), random_state=SEED)
+    shap_sample = full_df[best_features].sample(n=min(2000, len(full_df)), random_state=rng)
     explainer = shap.TreeExplainer(final_model)
     shap_values = explainer.shap_values(shap_sample)
     shap_df = pd.DataFrame(shap_values, columns=best_features)
