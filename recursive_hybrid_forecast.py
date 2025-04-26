@@ -21,7 +21,7 @@ ROLLING_WINDOWS = [2, 3, 5, 10, 14, 21] # Added 14 and 21
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 50 # Number of Optuna trials
+OPTUNA_TRIALS = 1 # Number of Optuna trials
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -497,7 +497,7 @@ def recursive_ensemble(train_df, test_df, FEATURES, n_models=5):
 # --- Recursive Ensemble Prediction ---
 logging.info("Running recursive ensemble prediction...")
 ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, n_models=5)
-final_predictions_df['num_orders_ensemble'] = ensemble_preds.values
+final_predictions_df['num_orders_ensemble'] = ensemble_preds
 submission_path_ensemble = f"{SUBMISSION_FILE_PREFIX}_optuna_ensemble.csv"
 final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble, index=False)
 logging.info(f"Ensemble submission file saved to {submission_path_ensemble}")
