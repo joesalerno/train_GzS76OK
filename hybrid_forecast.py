@@ -26,6 +26,7 @@ TARGET = "num_orders"
 # --- Load data ---
 df = pd.read_csv(DATA_PATH).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
 test = pd.read_csv(TEST_PATH).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
+test_ids = test["id"].copy()  # Save test IDs before feature engineering
 meal_info = pd.read_csv(MEAL_INFO_PATH)
 df = df.merge(meal_info, on="meal_id", how="left")
 test = test.merge(meal_info, on="meal_id", how="left")
@@ -62,7 +63,7 @@ def create_features_all(df, is_test=False, train_hist=None):
         df[col] = df[col].apply(lambda x: "Rare" if x in rare else x)
     # --- Lags, rollings, price, promo, interactions (as before) ---
     if is_test and train_hist is not None:
-        # Row-wise for test, using train_hist for lags/rollings
+        # Row-wise for test, using train_hist for lags/rollings and all historical features
         for lag in LAG_WEEKS:
             df[f"num_orders_lag_{lag}"] = np.nan
         for window in ROLLING_WINDOWS:
@@ -93,6 +94,10 @@ def create_features_all(df, is_test=False, train_hist=None):
             df.at[idx, "lag1_x_emailer"] = df.at[idx, "num_orders_lag_1"] * row["emailer_for_promotion"]
             df.at[idx, "price_diff_x_home"] = df.at[idx, "price_diff"] * row["homepage_featured"]
             df.at[idx, "lag1_x_home"] = df.at[idx, "num_orders_lag_1"] * row["homepage_featured"]
+        # Impute rolling_volatility_10 and demand_pct_change_1 with train means if not enough history
+        for col in ["rolling_volatility_10", "demand_pct_change_1"]:
+            train_mean = train_hist[col].mean() if col in train_hist.columns else 0
+            df[col] = df[col].fillna(train_mean)
     else:
         # Standard vectorized feature engineering for train/valid
         for lag in LAG_WEEKS:
@@ -144,11 +149,9 @@ def create_features_all(df, is_test=False, train_hist=None):
                 df.groupby(group)["num_orders"]
                 .transform(lambda x: x.shift(1).rolling(window).std())
             )
-        df["demand_pct_change_1"] = df.groupby(group)["num_orders"].transform(lambda x: x.pct_change().fillna(0))
     else:
         for window in [5, 10]:
             df[f"rolling_volatility_{window}"] = 0
-        df["demand_pct_change_1"] = 0
     # --- Regime clustering ---
     ref_df = train_hist if is_test and train_hist is not None else df
     if "weekofyear" not in ref_df.columns:
@@ -193,8 +196,9 @@ def get_feature_list(df):
     base += [f"rolling_std_{w}" for w in ROLLING_WINDOWS]
     base += [f"{col}_rolling_sum_3" for col in ["emailer_for_promotion", "homepage_featured"]]
     base += ["price_diff_x_emailer", "lag1_x_emailer", "price_diff_x_home", "lag1_x_home"]
-    base += [f"rolling_volatility_{w}" for w in [5, 10]]
-    base += ["demand_pct_change_1"]
+    # REMOVE rolling_volatility_10 and demand_pct_change_1 from feature list for robustness
+    # base += [f"rolling_volatility_{w}" for w in [5, 10]]
+    # base += ["demand_pct_change_1"]
     base += [f"weeks_since_{col}" for col in ["emailer_for_promotion", "homepage_featured"]]
     base += [f"{col}_target_enc" for col in ["category", "cuisine", "center_type"] if f"{col}_target_enc" in df.columns]
     base += [f"{col}_orders_{stat}" for col in ["meal_id", "center_id", "category", "cuisine", "center_type"] for stat in ["mean", "median", "std"] if f"{col}_orders_{stat}" in df.columns]
@@ -271,95 +275,5 @@ def optuna_feature_selection_cv(train_df, features, target, n_trials=N_TRIALS):
             rmsles.append(rmsle(y_val, preds))
         trial.report(np.mean(rmsles), step=0)
         return np.mean(rmsles)
-    try:
-        study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
-        print(f"Resuming Optuna study '{OPTUNA_STUDY_NAME}'...")
-    except Exception:
-        study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB, pruner=SuccessiveHalvingPruner())
-        print(f"Created new Optuna study '{OPTUNA_STUDY_NAME}'...")
-    print(f"Starting Optuna optimization for {n_trials} trials. This may take many hours. You can safely interrupt and resume.")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
-    best_trial = study.best_trial
-    best_params = {k: v for k, v in best_trial.params.items() if not k.startswith('use_')}
-    best_features = [f for f in features if best_trial.params.get(f'use_{f}', True)]
-    study.trials_dataframe().to_csv("optuna_hybrid_optuna_trials.csv", index=False)
-    print("Best Optuna params:", best_params)
-    print("Best Optuna feature subset:", best_features)
-    return best_params, best_features
 
-# --- Offset correction ---
-def compute_group_offsets(model, valid_df, features, target, group_cols):
-    offsets = {}
-    for group, group_df in valid_df.groupby(group_cols):
-        y_true = group_df[target]
-        y_pred = model.predict(group_df[features])
-        grid = np.linspace(-20, 20, 201)
-        rmsle_scores = [rmsle(y_true, y_pred + o) for o in grid]
-        offsets[group] = grid[np.argmin(rmsle_scores)]
-    return offsets
-
-def apply_group_offsets_with_fallback(model, test_feat, features, group_cols, group_offsets, global_offset):
-    preds = model.predict(test_feat[features])
-    group_keys = test_feat[group_cols].apply(tuple, axis=1)
-    offsets = np.array([group_offsets.get(key, global_offset) for key in group_keys])
-    return np.clip(preds + offsets, 0, None).round().astype(int)
-
-# --- Main pipeline ---
-if __name__ == "__main__":
-    # Preserve a raw copy of the training data for test feature creation
-    raw_train_df = pd.read_csv(DATA_PATH).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
-    meal_info = pd.read_csv(MEAL_INFO_PATH)
-    center_info = pd.read_csv(CENTER_INFO_PATH)
-    raw_train_df = raw_train_df.merge(meal_info, on="meal_id", how="left")
-    raw_train_df = raw_train_df.merge(center_info, on="center_id", how="left")
-    # Feature engineering
-    df = create_features_all(raw_train_df)
-    df = df[df["num_orders"].notna()].reset_index(drop=True)
-    FEATURES = get_feature_list(df)
-    # Train/validation split
-    max_week = df["week"].max()
-    valid_df = df[df["week"] > max_week - 8].copy()
-    train_df = df[df["week"] <= max_week - 8].copy()
-    # Optuna feature+param selection with CV
-    best_params, best_features = optuna_feature_selection_cv(train_df, FEATURES, TARGET, n_trials=N_TRIALS)
-    # Retrain on all data
-    full_df = pd.concat([train_df, valid_df], axis=0).reset_index(drop=True)
-    final_model = get_lgbm(best_params)
-    final_model.fit(full_df[best_features], full_df[TARGET], eval_metric=lgb_rmsle)
-    # Offset correction using validation set
-    group_cols = ["meal_id", "center_id"]
-    group_offsets = compute_group_offsets(final_model, valid_df, best_features, TARGET, group_cols)
-    global_offset = np.mean(list(group_offsets.values())) if group_offsets else 0
-    # Test feature creation
-    test_feat = create_features_all(test, is_test=True, train_hist=raw_train_df)
-    test_feat, _ = test_feat.align(full_df, join="right", axis=1, fill_value=0)
-    test_feat["num_orders"] = apply_group_offsets_with_fallback(final_model, test_feat, best_features, group_cols, group_offsets, global_offset)
-    submission = test_feat[["id", "num_orders"]].copy()
-    submission["id"] = submission["id"].astype(int)
-    submission.to_csv("submission_hybrid_optuna.csv", index=False)
-    print("submission_hybrid_optuna.csv saved.")
-    # SHAP analysis
-    shap_sample = full_df[best_features].sample(n=min(2000, len(full_df)), random_state=rng)
-    explainer = shap.TreeExplainer(final_model)
-    shap_values = explainer.shap_values(shap_sample)
-    shap_df = pd.DataFrame(shap_values, columns=best_features)
-    shap_df.to_csv("shap_hybrid_optuna_values.csv", index=False)
-    shap_importance = np.abs(shap_values).mean(axis=0)
-    shap_importance_df = pd.DataFrame({
-        'feature': best_features,
-        'mean_abs_shap': shap_importance
-    }).sort_values('mean_abs_shap', ascending=False)
-    shap_importance_df.to_csv("shap_hybrid_optuna_feature_importances.csv", index=False)
-    plt.figure(figsize=(12, 8))
-    shap.summary_plot(shap_values, shap_sample, feature_names=best_features, show=False)
-    plt.tight_layout()
-    plt.savefig("shap_hybrid_optuna_summary.png")
-    plt.close()
-    plt.figure(figsize=(10, 6))
-    shap_importance_df.head(20).plot.bar(x='feature', y='mean_abs_shap', legend=False)
-    plt.title('Top 20 SHAP Feature Importances (Hybrid Optuna Model)')
-    plt.ylabel('Mean |SHAP value|')
-    plt.tight_layout()
-    plt.savefig('shap_hybrid_optuna_top20.png')
-    plt.close()
-    print("SHAP analysis for Optuna-tuned hybrid model saved.")
+    # ...existing code...
