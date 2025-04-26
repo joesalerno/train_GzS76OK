@@ -182,7 +182,7 @@ FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_") 
 FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["category_", "cuisine_", "center_type_"])]
 
 # Ensure only existing columns are included (robustness)
-FEATURES = [f for f in FEATURES if f in train_df.columns and f != TARGET and f !='id']
+# FEATURES = [f for f in FEATURES if f not in ("week", "weekofyear") and f in train_df.columns and f != TARGET and f !='id']
 logging.info(f"Using {len(FEATURES)} features: {FEATURES}")
 
 
