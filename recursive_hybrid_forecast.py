@@ -15,13 +15,13 @@ TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
-LAG_WEEKS = [1, 2, 3, 5, 10] # Lags based on num_orders
-ROLLING_WINDOWS = [2, 5, 14] # Added 14 and 21
+LAG_WEEKS = [1, 2, 3, 5, 10]
+ROLLING_WINDOWS = [2, 3, 4, 5, 7, 14]
 # Other features (not directly dependent on recursive prediction)
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 1 # Number of Optuna trials
+OPTUNA_TRIALS = 50 # Number of Optuna trials
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -116,21 +116,42 @@ def create_group_aggregates(df):
         df_out['category_orders_std'] = df_out.groupby('category')['num_orders'].transform('std')
     return df_out
 
-def cyclical_encode(df, col, max_val):
-    df_out = df.copy()
-    df_out[f'{col}_sin'] = np.sin(2 * np.pi * df_out[col] / max_val)
-    df_out[f'{col}_cos'] = np.cos(2 * np.pi * df_out[col] / max_val)
-    return df_out
-
 def create_advanced_interactions(df):
     df_out = df.copy()
-    # Interactions with rolling_mean_2
-    if 'num_orders_rolling_mean_2' in df_out.columns:
-        df_out['rolling_mean_2_x_discount_pct'] = df_out['num_orders_rolling_mean_2'] * df_out.get('discount_pct', 0)
-        df_out['rolling_mean_2_x_price_diff'] = df_out['num_orders_rolling_mean_2'] * df_out.get('price_diff', 0)
-        df_out['rolling_mean_2_x_weekofyear'] = df_out['num_orders_rolling_mean_2'] * df_out.get('weekofyear', 0)
-        # Polynomial
-        df_out['rolling_mean_2_sq'] = df_out['num_orders_rolling_mean_2'] ** 2
+    # Identify top features for nonlinear transforms and interactions
+    top_features = [
+        'num_orders_rolling_mean_2',
+        'num_orders_rolling_mean_5',
+        'num_orders_rolling_mean_14',
+        'meal_orders_mean',
+        'center_orders_mean',
+        'meal_orders_std',
+        'rolling_mean_2_sq',
+        'checkout_price',
+        'price_diff_x_emailer',
+        'rolling_mean_2_x_emailer',
+    ]
+    # Nonlinear transforms: square, log1p (where appropriate)
+    for feat in top_features:
+        if feat in df_out.columns:
+            df_out[f'{feat}_sq'] = df_out[feat] ** 2
+            # Only apply log1p to strictly positive features
+            if (df_out[feat] > 0).any():
+                df_out[f'{feat}_log1p'] = np.log1p(np.clip(df_out[feat], a_min=0, a_max=None))
+    # Advanced interactions: pairwise products of top rolling means and aggregates
+    interaction_pairs = [
+        ('num_orders_rolling_mean_2', 'checkout_price'),
+        ('num_orders_rolling_mean_5', 'emailer_for_promotion'),
+        ('num_orders_rolling_mean_14', 'homepage_featured'),
+        ('meal_orders_mean', 'discount_pct'),
+        ('center_orders_mean', 'price_diff'),
+        ('meal_orders_mean', 'weekofyear'),
+        ('num_orders_rolling_mean_2', 'meal_orders_mean'),
+        ('num_orders_rolling_mean_5', 'center_orders_mean'),
+    ]
+    for feat1, feat2 in interaction_pairs:
+        if feat1 in df_out.columns and feat2 in df_out.columns:
+            df_out[f'{feat1}_x_{feat2}'] = df_out[feat1] * df_out[feat2]
     return df_out
 
 def create_interaction_features(df):
@@ -163,7 +184,6 @@ def apply_feature_engineering(df, is_train=True):
     df_out = create_group_aggregates(df_out)
     df_out = create_interaction_features(df_out)
     df_out = create_advanced_interactions(df_out)
-    df_out = cyclical_encode(df_out, 'weekofyear', 52)
 
     # Fill NaNs for all engineered features
     lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_std"])]
@@ -197,22 +217,57 @@ train_df = train_df.dropna(subset=['num_orders']).reset_index(drop=True)
 
 # --- Define Features and Target ---
 TARGET = "num_orders"
-FEATURES = [
+features_set = set()
+FEATURES = []
+
+# Add base features
+base_features = [
     "checkout_price", "base_price", "homepage_featured", "emailer_for_promotion",
-    "discount", "discount_pct", "price_diff", "weekofyear",
-    # Cyclical encoding
-    "weekofyear_sin", "weekofyear_cos"
+    "discount", "discount_pct", "price_diff", "weekofyear"
 ]
-FEATURES += [f"{TARGET}_rolling_mean_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_mean_{w}" in train_df.columns]
-FEATURES += [f"{TARGET}_rolling_std_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_std_{w}" in train_df.columns]
-FEATURES += [f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" for col in OTHER_ROLLING_SUM_COLS if f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" in train_df.columns]
-# Add all interaction features, including new rolling mean 2 interactions and advanced interactions
-FEATURES += [col for col in train_df.columns if col.startswith("price_diff_x_") or col.startswith("rolling_mean_2_x_") or col.endswith("_sq")]
+for f in base_features:
+    if f in train_df.columns and f not in features_set:
+        FEATURES.append(f)
+        features_set.add(f)
+
+# Add rolling means/stds
+for w in ROLLING_WINDOWS:
+    mean_col = f"{TARGET}_rolling_mean_{w}"
+    std_col = f"{TARGET}_rolling_std_{w}"
+    if mean_col in train_df.columns and mean_col not in features_set:
+        FEATURES.append(mean_col)
+        features_set.add(mean_col)
+    if std_col in train_df.columns and std_col not in features_set:
+        FEATURES.append(std_col)
+        features_set.add(std_col)
+
+# Add rolling sums
+for col in OTHER_ROLLING_SUM_COLS:
+    sum_col = f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}"
+    if sum_col in train_df.columns and sum_col not in features_set:
+        FEATURES.append(sum_col)
+        features_set.add(sum_col)
+
+# Add interaction and advanced features
+for col in train_df.columns:
+    if (col.startswith("price_diff_x_") or col.startswith("rolling_mean_2_x_") or col.endswith("_sq") or col.endswith("_log1p") or "_x_" in col) and col not in features_set and col != TARGET and col != 'id':
+        FEATURES.append(col)
+        features_set.add(col)
+
 # Add group-level aggregates
-FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["center_orders_", "meal_orders_", "category_orders_"])]
+for prefix in ["center_orders_", "meal_orders_", "category_orders_"]:
+    for col in train_df.columns:
+        if col.startswith(prefix) and col not in features_set and col != TARGET and col != 'id':
+            FEATURES.append(col)
+            features_set.add(col)
+
 # Add one-hot columns if present
-FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["category_", "cuisine_", "center_type_"])]
-FEATURES = [f for f in FEATURES if f in train_df.columns and f != TARGET and f !='id']
+for prefix in ["category_", "cuisine_", "center_type_"]:
+    for col in train_df.columns:
+        if col.startswith(prefix) and col not in features_set and col != TARGET and col != 'id':
+            FEATURES.append(col)
+            features_set.add(col)
+
 logging.info(f"Using {len(FEATURES)} features: {FEATURES}")
 
 
