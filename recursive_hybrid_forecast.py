@@ -21,7 +21,7 @@ ROLLING_WINDOWS = [2, 3, 5, 10, 14, 21] # Added 14 and 21
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 1 # Number of Optuna trials
+OPTUNA_TRIALS = 50 # Number of Optuna trials
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -431,6 +431,40 @@ try:
 except Exception as e:
     logging.error(f"Error during SHAP analysis: {e}")
 
+def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001):
+    """
+    Prune features by SHAP importance and correlation:
+    - Keep only features with SHAP importance above threshold or in top N.
+    - For highly correlated pairs, keep only the one with higher SHAP importance.
+    """
+    import pandas as pd
+    # Load SHAP importances
+    shap_df = pd.read_csv(shap_importance_path)
+    shap_df = shap_df.set_index('feature')
+    # 1. Keep only top N or above min importance
+    shap_df = shap_df.sort_values('mean_abs_shap', ascending=False)
+    keep_features = set(shap_df.head(shap_top_n).index)
+    keep_features |= set(shap_df[shap_df['mean_abs_shap'] >= shap_min_importance].index)
+    keep_features = [f for f in FEATURES if f in keep_features]
+    # 2. Remove highly correlated features (keep higher SHAP)
+    corr = train_df[keep_features].corr().abs()
+    to_remove = set()
+    for i, f1 in enumerate(keep_features):
+        for f2 in keep_features[i+1:]:
+            if corr.loc[f1, f2] > corr_threshold:
+                # Remove the one with lower SHAP
+                if shap_df.loc[f1, 'mean_abs_shap'] >= shap_df.loc[f2, 'mean_abs_shap']:
+                    to_remove.add(f2)
+                else:
+                    to_remove.add(f1)
+    pruned_features = [f for f in keep_features if f not in to_remove]
+    logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using SHAP and correlation.")
+    return pruned_features
+
+# --- Prune features before training ---
+shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
+FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001)
+logging.info(f"Final pruned feature set: {FEATURES}")
 
 # --- Plotting Example: Actual vs Predicted for Validation Set ---
 logging.info("Generating validation plot...")
