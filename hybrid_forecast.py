@@ -12,6 +12,7 @@ TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
+N_TRIALS = 1
 np.random.seed(SEED)
 random.seed(SEED)
 LAG_WEEKS = [1, 2, 3, 5, 10]
@@ -44,10 +45,15 @@ def cyclical_encode(df, col, max_val):
 def create_features_all(df, is_test=False, train_hist=None):
     df = df.copy()
     group = ["center_id", "meal_id"]
+    # --- Fail-fast: Ensure all required columns are present before feature engineering ---
+    required_cols = ["category", "cuisine", "center_type", "meal_id", "center_id", "week", "checkout_price", "base_price", "emailer_for_promotion", "homepage_featured"]
+    if not is_test:
+        required_cols.append("num_orders")
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for feature engineering: {missing}")
     # --- Rare category grouping ---
     for col in ["category", "cuisine", "center_type"]:
-        if col not in df.columns:
-            continue
         rare = get_rare_categories(train_hist if is_test and train_hist is not None else df, col, min_count=100)
         df[col] = df[col].apply(lambda x: "Rare" if x in rare else x)
     # --- Lags, rollings, price, promo, interactions (as before) ---
@@ -103,15 +109,11 @@ def create_features_all(df, is_test=False, train_hist=None):
     # --- Target encoding for categorical features ---
     for col in ["category", "cuisine", "center_type"]:
         ref_df = train_hist if is_test and train_hist is not None else df
-        if col not in df.columns or col not in ref_df.columns:
-            continue
         means = ref_df.groupby(col)["num_orders"].mean()
-        global_mean = ref_df["num_orders"].mean() if "num_orders" in ref_df else 0
+        global_mean = ref_df["num_orders"].mean()
         df[f"{col}_target_enc"] = df[col].map(means).fillna(global_mean)
     # --- Aggregate features ---
     for col in ["meal_id", "center_id", "category", "cuisine", "center_type"]:
-        if col not in df.columns:
-            continue
         for stat in ["mean", "median", "std"]:
             if not is_test:
                 df[f"{col}_orders_{stat}"] = df.groupby(col)["num_orders"].transform(stat)
@@ -123,24 +125,32 @@ def create_features_all(df, is_test=False, train_hist=None):
     df = cyclical_encode(df, "weekofyear", 52)
     # --- Promo recency ---
     for col in ["emailer_for_promotion", "homepage_featured"]:
-        if col in df.columns:
-            df[f"weeks_since_{col}"] = (
-                df.groupby(group)[col]
-                .transform(lambda x: x[::-1].cumsum()[::-1].where(x == 1, 0))
-            )
+        df[f"weeks_since_{col}"] = (
+            df.groupby(group)[col]
+            .transform(lambda x: x[::-1].cumsum()[::-1].where(x == 1, 0))
+        )
     # --- Holiday/event features ---
     holiday_weeks = set([1, 52, 45, 10, 25])
     df["is_holiday_week"] = df["weekofyear"].isin(holiday_weeks).astype(int)
     df["weeks_to_next_holiday"] = df["weekofyear"].apply(lambda w: min([(h-w)%52 for h in holiday_weeks]))
     # --- Demand volatility/change ---
-    for window in [5, 10]:
-        df[f"rolling_volatility_{window}"] = (
-            df.groupby(group)["num_orders"]
-            .transform(lambda x: x.shift(1).rolling(window).std())
-        )
-    df["demand_pct_change_1"] = df.groupby(group)["num_orders"].transform(lambda x: x.pct_change().fillna(0))
+    if not is_test:
+        for window in [5, 10]:
+            df[f"rolling_volatility_{window}"] = (
+                df.groupby(group)["num_orders"]
+                .transform(lambda x: x.shift(1).rolling(window).std())
+            )
+        df["demand_pct_change_1"] = df.groupby(group)["num_orders"].transform(lambda x: x.pct_change().fillna(0))
+    else:
+        for window in [5, 10]:
+            df[f"rolling_volatility_{window}"] = 0
+        df["demand_pct_change_1"] = 0
     # --- Regime clustering ---
-    week_means = (train_hist if is_test and train_hist is not None else df).groupby("weekofyear")["num_orders"].mean()
+    ref_df = train_hist if is_test and train_hist is not None else df
+    if "weekofyear" not in ref_df.columns:
+        ref_df = ref_df.copy()
+        ref_df["weekofyear"] = ref_df["week"] % 52
+    week_means = ref_df.groupby("weekofyear")["num_orders"].mean()
     if len(week_means.unique()) >= 3:
         bins = pd.qcut(week_means, 3, labels=["low", "med", "high"])
     else:
@@ -226,7 +236,7 @@ def get_lgbm(params=None):
     return LGBMRegressor(**default_params)
 
 # --- Unified Optuna feature+hyperparameter selection with CV ---
-def optuna_feature_selection_cv(train_df, features, target, n_trials=10):
+def optuna_feature_selection_cv(train_df, features, target, n_trials=N_TRIALS):
     from optuna.pruners import SuccessiveHalvingPruner
     OPTUNA_DB = "sqlite:///optuna_hybrid_optuna.db"
     OPTUNA_STUDY_NAME = "hybrid_optuna_feature_selection"
@@ -292,8 +302,14 @@ def apply_group_offsets_with_fallback(model, test_feat, features, group_cols, gr
 
 # --- Main pipeline ---
 if __name__ == "__main__":
+    # Preserve a raw copy of the training data for test feature creation
+    raw_train_df = pd.read_csv(DATA_PATH).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
+    meal_info = pd.read_csv(MEAL_INFO_PATH)
+    center_info = pd.read_csv(CENTER_INFO_PATH)
+    raw_train_df = raw_train_df.merge(meal_info, on="meal_id", how="left")
+    raw_train_df = raw_train_df.merge(center_info, on="center_id", how="left")
     # Feature engineering
-    df = create_features_all(df)
+    df = create_features_all(raw_train_df)
     df = df[df["num_orders"].notna()].reset_index(drop=True)
     FEATURES = get_feature_list(df)
     # Train/validation split
@@ -301,7 +317,7 @@ if __name__ == "__main__":
     valid_df = df[df["week"] > max_week - 8].copy()
     train_df = df[df["week"] <= max_week - 8].copy()
     # Optuna feature+param selection with CV
-    best_params, best_features = optuna_feature_selection_cv(train_df, FEATURES, TARGET, n_trials=10)
+    best_params, best_features = optuna_feature_selection_cv(train_df, FEATURES, TARGET, n_trials=N_TRIALS)
     # Retrain on all data
     full_df = pd.concat([train_df, valid_df], axis=0).reset_index(drop=True)
     final_model = get_lgbm(best_params)
@@ -311,7 +327,7 @@ if __name__ == "__main__":
     group_offsets = compute_group_offsets(final_model, valid_df, best_features, TARGET, group_cols)
     global_offset = np.mean(list(group_offsets.values())) if group_offsets else 0
     # Test feature creation
-    test_feat = create_features_all(test, is_test=True, train_hist=full_df)
+    test_feat = create_features_all(test, is_test=True, train_hist=raw_train_df)
     test_feat, _ = test_feat.align(full_df, join="right", axis=1, fill_value=0)
     test_feat["num_orders"] = apply_group_offsets_with_fallback(final_model, test_feat, best_features, group_cols, group_offsets, global_offset)
     submission = test_feat[["id", "num_orders"]].copy()
