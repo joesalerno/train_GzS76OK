@@ -29,7 +29,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 1 # Number of Optuna trials (increased for better search)
+OPTUNA_TRIALS = 20 # Number of Optuna trials (increased for better search)
 OPTUNA_NJOBS = 1  # Use sequential Optuna trials for best resource usage with LGBM
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
@@ -678,7 +678,6 @@ try:
     plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_top20_importance.png"))
     plt.close()
     for feat in shap_importance_df['feature']:
-        plt.figure()
         shap.dependence_plot(feat, shap_values, shap_sample[FEATURES], show=False)
         plt.tight_layout()
         plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_dependence_{feat}.png"))
