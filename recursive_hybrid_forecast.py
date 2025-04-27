@@ -259,6 +259,8 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     # Remove duplicate columns to avoid reindex error before NaN filling
     df_out = df_out.loc[:, ~df_out.columns.duplicated()]
     if cols_to_fill:
+        # Deduplicate again right before assignment, in case new dups were introduced
+        df_out = df_out.loc[:, ~df_out.columns.duplicated()]
         df_out.loc[:, cols_to_fill] = df_out[cols_to_fill].fillna(0)
     if "discount_pct" in df_out.columns:
         df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
