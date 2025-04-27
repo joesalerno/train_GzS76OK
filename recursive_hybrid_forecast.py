@@ -149,12 +149,12 @@ def create_advanced_interactions(df):
     promo_feats = ['emailer_for_promotion', 'homepage_featured']
     time_feats = ['weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos', 'mean_orders_by_weekofyear', 'mean_orders_by_month']
 
-    # Polynomial features (squared, cubic) -- skip *_sin and *_cos
+    # Polynomial features (squared, cubic) -- skip *_sin and *_cos and binary promo_feats
     top_feats = demand_feats + price_feats + promo_feats + time_feats
     for feat in top_feats:
         if feat in df_out.columns:
-            if feat.endswith('_sin') or feat.endswith('_cos'):
-                continue  # Do not create *_sin_sq or *_cos_sq
+            if feat.endswith('_sin') or feat.endswith('_cos') or feat in ['emailer_for_promotion', 'homepage_featured']:
+                continue  # Do not create *_sin_sq, *_cos_sq, or *_sq/_cube for binary promo_feats
             df_out[f'{feat}_sq'] = df_out[feat] ** 2
             df_out[f'{feat}_cube'] = df_out[feat] ** 3
 
@@ -504,9 +504,6 @@ final_params = {
 # final_params will be updated after best_params is defined
 
 # --- Optuna Feature Selection and Hyperparameter Tuning in a Single CV Loop ---
-import optuna
-from sklearn.model_selection import KFold
-
 def optuna_feature_selection_and_hyperparam_objective(trial):
     # Hyperparameter search space
     params = {
@@ -567,8 +564,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
 
 # --- Optuna Feature Selection + Hyperparameter Tuning ---
 logging.info("Starting Optuna feature+hyperparam selection (CV)...")
-
-# Wrap the study.optimize with a tqdm progress bar
 class TqdmOptunaCallback:
     def __init__(self, n_trials):
         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0)
@@ -576,12 +571,9 @@ class TqdmOptunaCallback:
         self.pbar.update(1)
     def close(self):
         self.pbar.close()
-
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS)
-# Use Optuna's RDB storage to allow resuming
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
-# Run Optuna sequentially for best performance with LGBM
 feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=OPTUNA_NJOBS)
 optuna_callback.close()
 
@@ -606,120 +598,7 @@ for col in ["category", "cuisine", "center_type", "center_id", "meal_id"]:
         valid_df[col] = valid_df[col].astype("category")
     if col in test_df.columns:
         test_df[col] = test_df[col].astype("category")
-
-# Identify categorical features present in FEATURES
 CATEGORICAL_FEATURES = [col for col in ["category", "cuisine", "center_type", "center_id", "meal_id"] if col in FEATURES]
-
-# --- Final Model Training with Selected Features and Best Params ---
-logging.info("Training final model on full training data with selected features and best params...")
-final_model = LGBMRegressor(**final_params)
-final_model.fit(
-    train_df[FEATURES], train_df[TARGET],
-    eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
-    eval_metric=lgb_rmsle,
-    callbacks=[early_stopping_with_overfit(100, 20, verbose=False)],
-    categorical_feature=CATEGORICAL_FEATURES
-)
-
-# --- Recursive Prediction with Final Model ---
-logging.info("Starting recursive prediction on the test set with final model...")
-test_weeks = sorted(test_df['week'].unique())
-history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
-for week_num in test_weeks:
-    logging.info(f"Predicting for week {week_num}...")
-    current_week_mask = history_df['week'] == week_num
-    history_df, _, _ = apply_feature_engineering(
-        history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
-    )
-    current_features = history_df.loc[current_week_mask, FEATURES]
-    missing_cols = [col for col in FEATURES if col not in current_features.columns]
-    if missing_cols:
-        logging.warning(f"Missing columns during prediction for week {week_num}: {missing_cols}. Filling with 0.")
-        for col in missing_cols:
-            current_features[col] = 0
-    current_features = current_features[FEATURES]
-    current_preds = final_model.predict(current_features)
-    current_preds = np.clip(current_preds, 0, None).round().astype(float)
-    history_df.loc[current_week_mask, 'num_orders'] = current_preds
-logging.info("Recursive prediction finished.")
-final_predictions_df = history_df.loc[history_df['id'].isin(test['id']), ['id', 'num_orders']].copy()
-final_predictions_df['num_orders'] = final_predictions_df['num_orders'].round().astype(int)
-final_predictions_df['id'] = final_predictions_df['id'].astype(int)
-
-# --- Create Submission File ---
-submission_path_final = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna.csv")
-final_predictions_df.to_csv(submission_path_final, index=False)
-logging.info(f"Final submission file saved to {submission_path_final}")
-
-# --- SHAP Analysis for Final Model ---
-logging.info("Calculating SHAP values for final model...")
-try:
-    if len(train_df) > N_SHAP_SAMPLES:
-        shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
-    else:
-        shap_sample = train_df.copy()
-    explainer = shap.TreeExplainer(final_model)
-    shap_values = explainer.shap_values(shap_sample[FEATURES])
-    shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
-    shap_values_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_values.csv"), index=False)
-    # Save as .npy for further analysis
-    np.save(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_values.npy"), shap_values)
-    shap_importance_df = pd.DataFrame({
-        'feature': FEATURES,
-        'mean_abs_shap': np.abs(shap_values).mean(axis=0)
-    }).sort_values('mean_abs_shap', ascending=False)
-    shap_importance_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_feature_importances.csv"), index=False)
-    plt.figure()
-    shap.summary_plot(shap_values, shap_sample[FEATURES], show=False, max_display=len(FEATURES))
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_summary_all_features.png"))
-    plt.close()
-    plt.figure(figsize=(10, 8))
-    shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
-    plt.gca().invert_yaxis()
-    plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
-    plt.title('Top 20 SHAP Feature Importances (Final Optuna Model)')
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_top20_importance.png"))
-    plt.close()
-    for feat in shap_importance_df['feature']:
-        plt.figure()
-        shap.dependence_plot(feat, shap_values, shap_sample[FEATURES], show=False)
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_dependence_{feat}.png"))
-        plt.close()
-    try:
-        shap_interaction_values = explainer.shap_interaction_values(shap_sample[FEATURES])
-        plt.figure()
-        shap.summary_plot(shap_interaction_values, shap_sample[FEATURES], show=False, max_display=20)
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_interaction_summary.png"))
-        plt.close()
-    except Exception as e:
-        logging.warning(f"Could not generate SHAP interaction summary plot: {e}")
-    logging.info("SHAP analysis saved for final model.")
-except Exception as e:
-    logging.error(f"Error during SHAP analysis for final model: {e}")
-
-# --- Validation Plot ---
-logging.info("Generating validation plot...")
-try:
-    valid_preds = final_model.predict(valid_df[FEATURES])
-    valid_preds = np.clip(valid_preds, 0, None)
-    plt.figure(figsize=(15, 6))
-    plt.scatter(valid_df[TARGET], valid_preds, alpha=0.5, s=10)
-    plt.plot([valid_df[TARGET].min(), valid_df[TARGET].max()], [valid_df[TARGET].min(), valid_df[TARGET].max()], 'r--', lw=2, label='Ideal')
-    plt.xlabel("Actual Orders (Validation Set)")
-    plt.ylabel("Predicted Orders (Validation Set)")
-    plt.title(f"Actual vs. Predicted Orders (Validation Set) - RMSLE: {rmsle(valid_df[TARGET], valid_preds):.4f}")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted.png"))
-    plt.close()
-    logging.info("Validation plot saved.")
-except Exception as e:
-    logging.error(f"Error during plotting: {e}")
 
 # --- Recursive Prediction and Ensemble Utilities ---
 def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None, month_means=None):
@@ -739,10 +618,9 @@ def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None,
     final_predictions['id'] = final_predictions['id'].astype(int)
     return final_predictions.set_index('id')['num_orders']
 
-
 def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=5, eval_metric=None):
-    """Sequential ensemble training with tqdm progress bar for status."""
     preds_list = []
+    models = []
     for i in tqdm(range(n_models), desc="Ensemble Models", position=0):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
         params = final_params.copy(); params.pop('seed', None)
@@ -758,15 +636,85 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
         else:
             model.fit(train_df[FEATURES], train_df[TARGET], categorical_feature=CATEGORICAL_FEATURES)
         preds_list.append(recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values)
-    return np.mean(preds_list, axis=0).round().astype(int)
+        models.append(model)
+    return np.mean(preds_list, axis=0).round().astype(int), models
 
 # --- Recursive Ensemble Prediction with Selected Features ---
 logging.info("Running recursive ensemble prediction with selected features...")
-ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=5, eval_metric=lgb_rmsle)
-final_predictions_df['num_orders_ensemble'] = ensemble_preds
+ensemble_preds, ensemble_models = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=5, eval_metric=lgb_rmsle)
+final_predictions_df = pd.DataFrame({'id': test_df['id'].astype(int), 'num_orders': ensemble_preds})
 submission_path_ensemble_final = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv")
-final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble_final, index=False)
+final_predictions_df.to_csv(submission_path_ensemble_final, index=False)
 logging.info(f"Ensemble submission file saved to {submission_path_ensemble_final}")
+
+# --- SHAP Analysis for Ensemble (using first model as representative) ---
+logging.info("Calculating SHAP values for ensemble (using first model)...")
+try:
+    if len(train_df) > N_SHAP_SAMPLES:
+        shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
+    else:
+        shap_sample = train_df.copy()
+    explainer = shap.TreeExplainer(ensemble_models[0])
+    shap_values = explainer.shap_values(shap_sample[FEATURES])
+    shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
+    shap_values_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_values.csv"), index=False)
+    np.save(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_values.npy"), shap_values)
+    shap_importance_df = pd.DataFrame({
+        'feature': FEATURES,
+        'mean_abs_shap': np.abs(shap_values).mean(axis=0)
+    }).sort_values('mean_abs_shap', ascending=False)
+    shap_importance_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_feature_importances.csv"), index=False)
+    plt.figure()
+    shap.summary_plot(shap_values, shap_sample[FEATURES], show=False, max_display=len(FEATURES))
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_summary_all_features.png"))
+    plt.close()
+    plt.figure(figsize=(10, 8))
+    shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
+    plt.gca().invert_yaxis()
+    plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
+    plt.title('Top 20 SHAP Feature Importances (Ensemble)')
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_top20_importance.png"))
+    plt.close()
+    for feat in shap_importance_df['feature']:
+        plt.figure()
+        shap.dependence_plot(feat, shap_values, shap_sample[FEATURES], show=False)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_dependence_{feat}.png"))
+        plt.close()
+    try:
+        shap_interaction_values = explainer.shap_interaction_values(shap_sample[FEATURES])
+        plt.figure()
+        shap.summary_plot(shap_interaction_values, shap_sample[FEATURES], show=False, max_display=20)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_interaction_summary.png"))
+        plt.close()
+    except Exception as e:
+        logging.warning(f"Could not generate SHAP interaction summary plot: {e}")
+    logging.info("SHAP analysis saved for ensemble.")
+except Exception as e:
+    logging.error(f"Error during SHAP analysis for ensemble: {e}")
+
+# --- Validation Plot (using first ensemble model) ---
+logging.info("Generating validation plot (using first ensemble model)...")
+try:
+    valid_preds = ensemble_models[0].predict(valid_df[FEATURES])
+    valid_preds = np.clip(valid_preds, 0, None)
+    plt.figure(figsize=(15, 6))
+    plt.scatter(valid_df[TARGET], valid_preds, alpha=0.5, s=10)
+    plt.plot([valid_df[TARGET].min(), valid_df[TARGET].max()], [valid_df[TARGET].min(), valid_df[TARGET].max()], 'r--', lw=2, label='Ideal')
+    plt.xlabel("Actual Orders (Validation Set)")
+    plt.ylabel("Predicted Orders (Validation Set)")
+    plt.title(f"Actual vs. Predicted Orders (Validation Set) - RMSLE: {rmsle(valid_df[TARGET], valid_preds):.4f}")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted_ensemble.png"))
+    plt.close()
+    logging.info("Validation plot saved.")
+except Exception as e:
+    logging.error(f"Error during plotting: {e}")
 
 # --- End of Script ---
 logging.info("All tasks completed.")
