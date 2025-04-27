@@ -524,7 +524,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'metric': 'None',
     }
     # Find all features with sin/cos in their name (excluding those already in a pair)
-    sincos_features = [f for f in FEATURES if ('sin' in f or 'cos' in f)]
+    sincos_features = [f for f in FEATURES if re.search(r'(_sin|_cos)', f)]
     # Group into pairs by prefix (e.g. 'num_orders_rolling_mean_2_x_weekofyear')
     import re
     pair_prefixes = set()
