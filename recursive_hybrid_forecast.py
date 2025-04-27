@@ -6,10 +6,8 @@ import shap
 import matplotlib.pyplot as plt
 import logging
 import lightgbm as lgb  # Added for early stopping callback
-from sklearn.model_selection import KFold
-from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import TimeSeriesSplit
 from tqdm import tqdm
-import concurrent.futures  # For parallel ensemble training
 
 # --- Configuration ---
 DATA_PATH = "train.csv"
@@ -318,6 +316,13 @@ test_df = df_full[df_full['week'].isin(test['week'].unique())].copy()
 train_df, weekofyear_means, month_means = apply_feature_engineering(train_df, is_train=True)
 test_df, _, _ = apply_feature_engineering(test_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means)
 
+# --- Set native categorical dtypes for LightGBM ---
+CATEGORICAL_FEATURES = [col for col in ["category", "cuisine", "center_type", "center_id", "meal_id"] if col in train_df.columns]
+for df_ in [train_df, test_df]:
+    for col in CATEGORICAL_FEATURES:
+        df_[col] = df_[col].astype("category")
+# valid_df will be defined after train/valid split, so set dtypes after that
+
 # Drop rows in train_df where target is NA (if any, though unlikely from problem desc)
 train_df = train_df.dropna(subset=['num_orders']).reset_index(drop=True)
 
@@ -403,6 +408,11 @@ logging.info(f"Removed manually identified correlated features. {len(FEATURES)} 
 max_week = train_df["week"].max()
 valid_df = train_df[train_df["week"] > max_week - VALIDATION_WEEKS].copy()
 train_split_df = train_df[train_df["week"] <= max_week - VALIDATION_WEEKS].copy()
+
+# Set categorical dtype for valid_df
+for col in CATEGORICAL_FEATURES:
+    if col in valid_df.columns:
+        valid_df[col] = valid_df[col].astype("category")
 
 logging.info(f"Train split shape: {train_split_df.shape}, Validation shape: {valid_df.shape}")
 
@@ -532,7 +542,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
     if len(selected_features) < 10:
         return float('inf')
-    kf = KFold(n_splits=3, shuffle=True, random_state=SEED)
+    tscv = TimeSeriesSplit(n_splits=3)
     return np.mean([
         rmsle(
             train_split_df.iloc[valid_idx][TARGET],
@@ -545,7 +555,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
                 callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
             ).predict(train_split_df.iloc[valid_idx][selected_features])
         )
-        for train_idx, valid_idx in kf.split(train_split_df)
+        for train_idx, valid_idx in tscv.split(train_split_df)
     ])
 
 # --- Optuna Feature Selection + Hyperparameter Tuning ---
@@ -581,6 +591,18 @@ logging.info(f"Optuna-selected cyclical pairs: {selected_pairs}")
 FEATURES = SELECTED_FEATURES
 final_params.update(best_params)
 
+# --- Set native categorical types for optimal LightGBM usage ---
+for col in ["category", "cuisine", "center_type", "center_id", "meal_id"]:
+    if col in train_df.columns:
+        train_df[col] = train_df[col].astype("category")
+    if col in valid_df.columns:
+        valid_df[col] = valid_df[col].astype("category")
+    if col in test_df.columns:
+        test_df[col] = test_df[col].astype("category")
+
+# Identify categorical features present in FEATURES
+CATEGORICAL_FEATURES = [col for col in ["category", "cuisine", "center_type", "center_id", "meal_id"] if col in FEATURES]
+
 # --- Final Model Training with Selected Features and Best Params ---
 logging.info("Training final model on full training data with selected features and best params...")
 final_model = LGBMRegressor(**final_params)
@@ -588,7 +610,8 @@ final_model.fit(
     train_df[FEATURES], train_df[TARGET],
     eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
     eval_metric=lgb_rmsle,
-    callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
+    callbacks=[early_stopping_with_overfit(100, 20, verbose=False)],
+    categorical_feature=CATEGORICAL_FEATURES
 )
 
 # --- Recursive Prediction with Final Model ---
@@ -695,8 +718,9 @@ def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None,
 
 
 def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=5, eval_metric=None):
-    """Parallelized ensemble training and prediction with early stopping and overfitting detection."""
-    def train_and_predict(i):
+    """Sequential ensemble training with tqdm progress bar for status."""
+    preds_list = []
+    for i in tqdm(range(n_models), desc="Ensemble Models", position=0):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
         params = final_params.copy(); params.pop('seed', None)
         model = LGBMRegressor(**params, seed=SEED+i)
@@ -705,13 +729,12 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
                 train_df[FEATURES], train_df[TARGET],
                 eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
                 eval_metric=eval_metric,
-                callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
+                callbacks=[early_stopping_with_overfit(100, 20, verbose=False)],
+                categorical_feature=CATEGORICAL_FEATURES
             )
         else:
-            model.fit(train_df[FEATURES], train_df[TARGET])
-        return recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values
-    with concurrent.futures.ThreadPoolExecutor(max_workers=n_models) as executor:
-        preds_list = list(executor.map(train_and_predict, range(n_models)))
+            model.fit(train_df[FEATURES], train_df[TARGET], categorical_feature=CATEGORICAL_FEATURES)
+        preds_list.append(recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values)
     return np.mean(preds_list, axis=0).round().astype(int)
 
 # --- Recursive Ensemble Prediction with Selected Features ---
