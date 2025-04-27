@@ -522,263 +522,21 @@ final_params = {
 final_params.update(best_params) # Best params from Optuna override defaults
 
 
-# --- Feature Removal Experiment ---
-# def feature_removal_experiment(train_df, valid_df, FEATURES, features_to_test, TARGET, model_params, n_trials=1):
-#     """
-#     For each feature in features_to_test, remove it from FEATURES, retrain, and report validation RMSLE.
-#     Returns a DataFrame with feature, RMSLE, and delta vs. baseline.
-#     """
-#     results = []
-#     # Baseline
-#     model = LGBMRegressor(**model_params)
-#     model.fit(train_df[FEATURES], train_df[TARGET])
-#     preds = model.predict(valid_df[FEATURES])
-#     baseline_rmsle = rmsle(valid_df[TARGET], preds)
-#     results.append({'feature': 'BASELINE', 'rmsle': baseline_rmsle, 'delta_vs_baseline': 0.0})
-#     # Test each feature
-#     for feat in tqdm(features_to_test, desc='Feature Removal Experiment'):
-#         if feat not in FEATURES:
-#             continue
-#         test_features = [f for f in FEATURES if f != feat]
-#         model = LGBMRegressor(**model_params)
-#         model.fit(train_df[test_features], train_df[TARGET])
-#         preds = model.predict(valid_df[test_features])
-#         rmsle_score = rmsle(valid_df[TARGET], preds)
-#         results.append({'feature': feat, 'rmsle': rmsle_score, 'delta_vs_baseline': rmsle_score - baseline_rmsle})
-#     results_df = pd.DataFrame(results)
-#     results_df = results_df.sort_values('rmsle')
-#     results_df.to_csv('feature_removal_experiment.csv', index=False)
-#     print('Feature removal experiment results saved to feature_removal_experiment.csv')
-#     return results_df
-
-# # --- Run Feature Removal Experiment ---
-# features_to_test = features_to_remove
-# model_params = final_params.copy()
-# model_params['n_estimators'] = 500 # Use fewer estimators for speed
-# feature_removal_experiment(train_split_df, valid_df, FEATURES, features_to_test, TARGET, model_params)
-
-
-
-# --- Cross-Validation Feature Removal Experiment ---
-# from sklearn.model_selection import KFold
-
-# def crossval_feature_removal_experiment(df, FEATURES, features_to_test, TARGET, model_params, n_splits=5):
-#     """
-#     For each feature in features_to_test, remove it from FEATURES, run KFold CV, and report mean/STD RMSLE.
-#     Returns a DataFrame with feature, mean RMSLE, std RMSLE, and delta vs. baseline.
-#     """
-#     results = []
-#     kf = KFold(n_splits=n_splits, shuffle=True, random_state=SEED)
-#     # Baseline
-#     baseline_scores = []
-#     for train_idx, valid_idx in tqdm(list(kf.split(df)), desc='CV Baseline'):
-#         train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
-#         model = LGBMRegressor(**model_params)
-#         model.fit(train_fold[FEATURES], train_fold[TARGET])
-#         preds = model.predict(valid_fold[FEATURES])
-#         baseline_scores.append(rmsle(valid_fold[TARGET], preds))
-#     baseline_mean = np.mean(baseline_scores)
-#     baseline_std = np.std(baseline_scores)
-#     results.append({'feature': 'BASELINE', 'mean_rmsle': baseline_mean, 'std_rmsle': baseline_std, 'delta_vs_baseline': 0.0})
-#     # Test each feature
-#     for feat in tqdm(features_to_test, desc='CV Feature Removal'):
-#         if feat not in FEATURES:
-#             continue
-#         test_features = [f for f in FEATURES if f != feat]
-#         scores = []
-#         for train_idx, valid_idx in kf.split(df):
-#             train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
-#             model = LGBMRegressor(**model_params)
-#             model.fit(train_fold[test_features], train_fold[TARGET])
-#             preds = model.predict(valid_fold[test_features])
-#             scores.append(rmsle(valid_fold[TARGET], preds))
-#         mean_score = np.mean(scores)
-#         std_score = np.std(scores)
-#         results.append({'feature': feat, 'mean_rmsle': mean_score, 'std_rmsle': std_score, 'delta_vs_baseline': mean_score - baseline_mean})
-#     results_df = pd.DataFrame(results)
-#     results_df = results_df.sort_values('mean_rmsle')
-#     results_df.to_csv('crossval_feature_removal_experiment.csv', index=False)
-#     print('Cross-validation feature removal experiment results saved to crossval_feature_removal_experiment.csv')
-#     return results_df
-
-# --- Run Cross-Validation Feature Removal Experiment ---
-# features_to_test = features_to_remove
-# model_params = get_lgbm().get_params()
-# model_params['n_estimators'] = 300 # Use fewer estimators for speed
-# crossval_feature_removal_experiment(train_split_df, FEATURES, features_to_test, TARGET, model_params, n_splits=5)
-
-
-
-final_model = LGBMRegressor(**final_params)
-
-# Train on the entire training dataset (train_split_df + valid_df)
-# No early stopping here, train for the specified number of estimators
-final_model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
-
-# --- Recursive Prediction ---
-logging.info("Starting recursive prediction on the test set...")
-# Prepare the combined data history (training data + test structure)
-# We need the structure of test_df but will fill num_orders recursively
-history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
-
-test_weeks = sorted(test_df['week'].unique())
-
-for week_num in test_weeks:
-    logging.info(f"Predicting for week {week_num}...")
-    # Identify rows for the current week to predict
-    current_week_mask = history_df['week'] == week_num
-
-    # Re-apply feature engineering for the current state
-    history_df, _, _ = apply_feature_engineering(
-        history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
-    )
-
-    current_features = history_df.loc[current_week_mask, FEATURES]
-
-    # Handle potential missing columns in test data after alignment (should not happen with proper alignment, but defensive)
-    missing_cols = [col for col in FEATURES if col not in current_features.columns]
-    if missing_cols:
-        logging.warning(f"Missing columns during prediction for week {week_num}: {missing_cols}. Filling with 0.")
-        for col in missing_cols:
-            current_features[col] = 0
-    current_features = current_features[FEATURES] # Ensure correct order
-
-    # Predict for the current week
-    current_preds = final_model.predict(current_features)
-    current_preds = np.clip(current_preds, 0, None).round().astype(float) # Use float for potential later calculations
-
-    # Update the 'num_orders' in history_df for the current week with predictions
-    # This ensures the next iteration uses the predicted values to calculate lags/rolling features
-    history_df.loc[current_week_mask, 'num_orders'] = current_preds
-
-logging.info("Recursive prediction finished.")
-
-# Extract final predictions for the original test set IDs
-final_predictions_df = history_df.loc[history_df['id'].isin(test['id']), ['id', 'num_orders']].copy()
-final_predictions_df['num_orders'] = final_predictions_df['num_orders'].round().astype(int) # Final conversion to int
-final_predictions_df['id'] = final_predictions_df['id'].astype(int)
-
-# --- Create Submission File ---
-submission_path = f"{SUBMISSION_FILE_PREFIX}_optuna.csv"
-final_predictions_df.to_csv(submission_path, index=False)
-logging.info(f"Submission file saved to {submission_path}")
-
-# --- SHAP Analysis ---
-logging.info("Calculating SHAP values...")
-try:
-    # Sample data for SHAP to keep computation reasonable
-    if len(train_df) > N_SHAP_SAMPLES:
-        shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
-    else:
-        shap_sample = train_df.copy()
-
-    explainer = shap.TreeExplainer(final_model)
-    shap_values = explainer.shap_values(shap_sample[FEATURES])
-
-    # Save SHAP values and importance
-    shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
-    shap_values_df.to_csv(f"{SHAP_FILE_PREFIX}_optuna_values.csv", index=False)
-
-    shap_importance_df = pd.DataFrame({
-        'feature': FEATURES,
-        'mean_abs_shap': np.abs(shap_values).mean(axis=0)
-    }).sort_values('mean_abs_shap', ascending=False)
-    shap_importance_df.to_csv(f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv", index=False)
-
-    # Generate SHAP plots
-    logging.info("Generating SHAP plots...")
-    # Summary Plot
-    plt.figure()
-    shap.summary_plot(shap_values, shap_sample[FEATURES], show=False)
-    plt.tight_layout()
-    plt.savefig(f"{SHAP_FILE_PREFIX}_optuna_summary.png")
-    plt.close()
-
-    # Importance Bar Plot (Top 20)
-    plt.figure(figsize=(10, 8))
-    shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
-    plt.gca().invert_yaxis() # Display most important at the top
-    plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
-    plt.title('Top 20 SHAP Feature Importances (Recursive Optuna Model)')
-    plt.tight_layout()
-    plt.savefig(f"{SHAP_FILE_PREFIX}_optuna_top20_importance.png")
-    plt.close()
-
-    logging.info("SHAP analysis saved.")
-
-except Exception as e:
-    logging.error(f"Error during SHAP analysis: {e}")
-
-def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95):
-    """
-    Prune features by correlation only:
-    - For highly correlated pairs, keep only the one with higher SHAP importance.
-    - Do NOT prune based on SHAP top N or minimum importance.
-    """
-    import pandas as pd
-    # Load SHAP importances
-    shap_df = pd.read_csv(shap_importance_path)
-    shap_df = shap_df.set_index('feature')
-    # Only consider features present in both FEATURES and SHAP importances
-    keep_features = [f for f in FEATURES if f in shap_df.index]
-    # Remove highly correlated features (keep higher SHAP)
-    corr = train_df[keep_features].corr().abs()
-    to_remove = set()
-    for i, f1 in enumerate(keep_features):
-        for f2 in keep_features[i+1:]:
-            if corr.loc[f1, f2] > corr_threshold:
-                # Remove the one with lower SHAP
-                if shap_df.loc[f1, 'mean_abs_shap'] >= shap_df.loc[f2, 'mean_abs_shap']:
-                    to_remove.add(f2)
-                else:
-                    to_remove.add(f1)
-    pruned_features = [f for f in keep_features if f not in to_remove]
-    logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using only correlation.")
-    logging.info(f"Removed features: {to_remove}")
-    return FEATURES # Uncomment the following line to run the pruning function
-    # return pruned_features
-
-# --- Prune features before final model training ---
-shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
-FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95)
-logging.info(f"Final pruned feature set (correlation only): {FEATURES}")
-
-# --- Plotting Example: Actual vs Predicted for Validation Set ---
-logging.info("Generating validation plot...")
-try:
-    valid_preds = final_model.predict(valid_df[FEATURES])
-    valid_preds = np.clip(valid_preds, 0, None)
-
-    plt.figure(figsize=(15, 6))
-    plt.scatter(valid_df[TARGET], valid_preds, alpha=0.5, s=10)
-    plt.plot([valid_df[TARGET].min(), valid_df[TARGET].max()], [valid_df[TARGET].min(), valid_df[TARGET].max()], 'r--', lw=2, label='Ideal')
-    plt.xlabel("Actual Orders (Validation Set)")
-    plt.ylabel("Predicted Orders (Validation Set)")
-    plt.title(f"Actual vs. Predicted Orders (Validation Set) - RMSLE: {rmsle(valid_df[TARGET], valid_preds):.4f}")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("validation_actual_vs_predicted.png")
-    plt.close()
-    logging.info("Validation plot saved.")
-
-except Exception as e:
-    logging.error(f"Error during plotting: {e}")
-
-logging.info("Script finished.")
-
-# --- Recursive Stacking/Ensembling ---
-def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means):
+# --- Recursive Prediction and Ensemble Utilities ---
+def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None, month_means=None):
     """Run recursive prediction for a single model."""
     history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
     test_weeks = sorted(test_df['week'].unique())
     for week_num in test_weeks:
         current_week_mask = history_df['week'] == week_num
-        history_df, _, _ = apply_feature_engineering(history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means)
+        # Only pass means if provided (for test set prediction)
+        if weekofyear_means is not None and month_means is not None:
+            history_df, _, _ = apply_feature_engineering(history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means)
+        else:
+            history_df, _, _ = apply_feature_engineering(history_df, is_train=False)
         current_features = history_df.loc[current_week_mask, FEATURES]
         missing_cols = [col for col in FEATURES if col not in current_features.columns]
         if missing_cols:
-            logging.warning(f"Missing columns during prediction for week {week_num}: {missing_cols}. Filling with 0.")
             for col in missing_cols:
                 current_features[col] = 0
         current_features = current_features[FEATURES]
@@ -791,7 +549,7 @@ def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, mont
     return final_predictions.set_index('id')['num_orders']
 
 
-def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=5):
+def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=5, eval_metric=None):
     """Train n_models with different seeds, run recursive prediction, and average results."""
     preds_list = []
     for i in range(n_models):
@@ -799,50 +557,15 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_mean
         params = final_params.copy()
         params.pop('seed', None)
         model = LGBMRegressor(**params, seed=SEED+i)
-        model.fit(train_df[FEATURES], train_df[TARGET])
+        if eval_metric is not None:
+            model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=eval_metric)
+        else:
+            model.fit(train_df[FEATURES], train_df[TARGET])
         preds = recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means)
         preds_list.append(preds.values)
     # Average predictions
     ensemble_preds = np.mean(preds_list, axis=0).round().astype(int)
     return ensemble_preds
-
-# --- Recursive Ensemble Prediction ---
-logging.info("Running recursive ensemble prediction...")
-ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=5)
-final_predictions_df['num_orders_ensemble'] = ensemble_preds
-submission_path_ensemble = f"{SUBMISSION_FILE_PREFIX}_optuna_ensemble.csv"
-final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble, index=False)
-logging.info(f"Ensemble submission file saved to {submission_path_ensemble}")
-
-# --- Optuna Feature Selection ---
-# import optuna
-# from sklearn.model_selection import KFold
-
-# def optuna_feature_selection_objective(trial):
-#     # Use a binary mask for each feature
-#     selected_features = [f for f in FEATURES if trial.suggest_categorical(f, [True, False])]
-#     if len(selected_features) < 10:  # Avoid too few features
-#         return float('inf')
-#     kf = KFold(n_splits=3, shuffle=True, random_state=SEED)
-#     scores = []
-#     for train_idx, valid_idx in kf.split(train_split_df):
-#         model = get_lgbm(final_params).set_params(n_estimators=300)
-#         model.fit(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET])
-#         preds = model.predict(train_split_df.iloc[valid_idx][selected_features])
-#         scores.append(rmsle(train_split_df.iloc[valid_idx][TARGET], preds))
-#     return np.mean(scores)
-
-# # --- Optuna Feature Selection ---
-# logging.info("Starting Optuna feature selection...")
-# feature_selection_study = optuna.create_study(direction="minimize")
-# feature_selection_study.optimize(optuna_feature_selection_objective, n_trials=40, timeout=3600)
-
-# best_mask = [feature_selection_study.best_trial.params.get(f, False) for f in FEATURES]
-# SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
-# logging.info(f"Optuna-selected features ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
-
-# # Use SELECTED_FEATURES for final model and ensemble
-# FEATURES = SELECTED_FEATURES
 
 # --- Optuna Feature Selection and Hyperparameter Tuning in a Single CV Loop ---
 import optuna
@@ -915,19 +638,19 @@ final_params.update(best_params)
 
 # --- Final Model Training with Selected Features and Best Params ---
 logging.info("Training final model on full training data with selected features and best params...")
+final_model = LGBMRegressor(**final_params)
 final_model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
 
 # --- Recursive Prediction with Final Model ---
 logging.info("Starting recursive prediction on the test set with final model...")
+test_weeks = sorted(test_df['week'].unique())
 history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
-
 for week_num in test_weeks:
     logging.info(f"Predicting for week {week_num}...")
     current_week_mask = history_df['week'] == week_num
     history_df, _, _ = apply_feature_engineering(
         history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
     )
-
     current_features = history_df.loc[current_week_mask, FEATURES]
     missing_cols = [col for col in FEATURES if col not in current_features.columns]
     if missing_cols:
@@ -935,13 +658,10 @@ for week_num in test_weeks:
         for col in missing_cols:
             current_features[col] = 0
     current_features = current_features[FEATURES]
-
     current_preds = final_model.predict(current_features)
     current_preds = np.clip(current_preds, 0, None).round().astype(float)
     history_df.loc[current_week_mask, 'num_orders'] = current_preds
-
 logging.info("Recursive prediction finished.")
-
 final_predictions_df = history_df.loc[history_df['id'].isin(test['id']), ['id', 'num_orders']].copy()
 final_predictions_df['num_orders'] = final_predictions_df['num_orders'].round().astype(int)
 final_predictions_df['id'] = final_predictions_df['id'].astype(int)
@@ -958,28 +678,21 @@ try:
         shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
     else:
         shap_sample = train_df.copy()
-
     explainer = shap.TreeExplainer(final_model)
     shap_values = explainer.shap_values(shap_sample[FEATURES])
-
     shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
     shap_values_df.to_csv(f"{SHAP_FILE_PREFIX}_final_optuna_values.csv", index=False)
-
     shap_importance_df = pd.DataFrame({
         'feature': FEATURES,
         'mean_abs_shap': np.abs(shap_values).mean(axis=0)
     }).sort_values('mean_abs_shap', ascending=False)
     shap_importance_df.to_csv(f"{SHAP_FILE_PREFIX}_final_optuna_feature_importances.csv", index=False)
-
     logging.info("Generating SHAP plots for final model...")
-    # Summary Plot
     plt.figure()
     shap.summary_plot(shap_values, shap_sample[FEATURES], show=False)
     plt.tight_layout()
     plt.savefig(f"{SHAP_FILE_PREFIX}_final_optuna_summary.png")
     plt.close()
-
-    # Importance Bar Plot (Top 20)
     plt.figure(figsize=(10, 8))
     shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
     plt.gca().invert_yaxis()
@@ -988,53 +701,33 @@ try:
     plt.tight_layout()
     plt.savefig(f"{SHAP_FILE_PREFIX}_final_optuna_top20_importance.png")
     plt.close()
-
     logging.info("SHAP analysis saved for final model.")
-
 except Exception as e:
     logging.error(f"Error during SHAP analysis for final model: {e}")
 
-# --- Recursive Stacking/Ensembling with Selected Features ---
-def recursive_predict(model, train_df, test_df, FEATURES):
-    """Run recursive prediction for a single model."""
-    history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
-    test_weeks = sorted(test_df['week'].unique())
-    for week_num in test_weeks:
-        current_week_mask = history_df['week'] == week_num
-        history_df, _, _ = apply_feature_engineering(history_df, is_train=False)
-        current_features = history_df.loc[current_week_mask, FEATURES]
-        missing_cols = [col for col in FEATURES if col not in current_features.columns]
-        if missing_cols:
-            for col in missing_cols:
-                current_features[col] = 0
-        current_features = current_features[FEATURES]
-        current_preds = model.predict(current_features)
-        current_preds = np.clip(current_preds, 0, None).round().astype(float)
-        history_df.loc[current_week_mask, 'num_orders'] = current_preds
-    final_predictions = history_df.loc[history_df['id'].isin(test_df['id']), ['id', 'num_orders']].copy()
-    final_predictions['num_orders'] = final_predictions['num_orders'].round().astype(int)
-    final_predictions['id'] = final_predictions['id'].astype(int)
-    return final_predictions.set_index('id')['num_orders']
-
-
-def recursive_ensemble(train_df, test_df, FEATURES, n_models=5):
-    """Train n_models with different seeds, run recursive prediction, and average results."""
-    preds_list = []
-    for i in range(n_models):
-        logging.info(f"Training ensemble model {i+1}/{n_models}...")
-        params = final_params.copy()
-        params.pop('seed', None)
-        model = LGBMRegressor(**params, seed=SEED+i)
-        model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
-        preds = recursive_predict(model, train_df, test_df, FEATURES)
-        preds_list.append(preds.values)
-    # Average predictions
-    ensemble_preds = np.mean(preds_list, axis=0).round().astype(int)
-    return ensemble_preds
+# --- Validation Plot ---
+logging.info("Generating validation plot...")
+try:
+    valid_preds = final_model.predict(valid_df[FEATURES])
+    valid_preds = np.clip(valid_preds, 0, None)
+    plt.figure(figsize=(15, 6))
+    plt.scatter(valid_df[TARGET], valid_preds, alpha=0.5, s=10)
+    plt.plot([valid_df[TARGET].min(), valid_df[TARGET].max()], [valid_df[TARGET].min(), valid_df[TARGET].max()], 'r--', lw=2, label='Ideal')
+    plt.xlabel("Actual Orders (Validation Set)")
+    plt.ylabel("Predicted Orders (Validation Set)")
+    plt.title(f"Actual vs. Predicted Orders (Validation Set) - RMSLE: {rmsle(valid_df[TARGET], valid_preds):.4f}")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("validation_actual_vs_predicted.png")
+    plt.close()
+    logging.info("Validation plot saved.")
+except Exception as e:
+    logging.error(f"Error during plotting: {e}")
 
 # --- Recursive Ensemble Prediction with Selected Features ---
 logging.info("Running recursive ensemble prediction with selected features...")
-ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, n_models=5)
+ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=5, eval_metric=lgb_rmsle)
 final_predictions_df['num_orders_ensemble'] = ensemble_preds
 submission_path_ensemble_final = f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv"
 final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble_final, index=False)
