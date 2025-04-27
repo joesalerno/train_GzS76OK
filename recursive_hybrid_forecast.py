@@ -263,6 +263,9 @@ def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_tra
     if is_train:
         weekofyear_means = df.groupby('weekofyear')['num_orders'].mean()
         month_means = df.groupby('month')['num_orders'].mean()
+    else:
+        if weekofyear_means is None or month_means is None:
+            raise ValueError("When is_train=False, weekofyear_means and month_means must be provided (not None).")
     df['mean_orders_by_weekofyear'] = df['weekofyear'].map(weekofyear_means)
     df['mean_orders_by_month'] = df['month'].map(month_means)
     # Outlier flags
