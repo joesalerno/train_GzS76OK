@@ -132,39 +132,88 @@ def create_interaction_features(df):
 
 def create_advanced_interactions(df):
     df_out = df.copy()
-    # Top features for polynomial and interaction terms
-    top_feats = [
+    # Define feature groups
+    demand_feats = [
         'num_orders_rolling_mean_2', 'num_orders_rolling_mean_5', 'num_orders_rolling_mean_14',
-        'meal_orders_mean', 'center_orders_mean', 'checkout_price', 'price_diff', 'discount_pct',
-        'weekofyear', 'emailer_for_promotion', 'homepage_featured'
+        'meal_orders_mean', 'center_orders_mean'
     ]
-    time_feats = {'weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos'}
+    price_feats = ['checkout_price', 'price_diff', 'discount_pct']
+    promo_feats = ['emailer_for_promotion', 'homepage_featured']
+    time_feats = ['weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos', 'mean_orders_by_weekofyear', 'mean_orders_by_month']
+
     # Polynomial features (squared, cubic)
+    top_feats = demand_feats + price_feats + promo_feats + time_feats
     for feat in top_feats:
         if feat in df_out.columns:
             df_out[f'{feat}_sq'] = df_out[feat] ** 2
             df_out[f'{feat}_cube'] = df_out[feat] ** 3
-    # Pairwise interactions among top features (at most one time feature)
+
+    # Pairwise interactions: only between different groups
+    def group_of(feat):
+        if feat in demand_feats: return 'demand'
+        if feat in price_feats: return 'price'
+        if feat in promo_feats: return 'promo'
+        if feat in time_feats: return 'time'
+        return None
     for i, feat1 in enumerate(top_feats):
         for feat2 in top_feats[i+1:]:
             if feat1 in df_out.columns and feat2 in df_out.columns:
-                if sum(f in time_feats for f in [feat1, feat2]) <= 1:
+                if group_of(feat1) != group_of(feat2):
                     df_out[f'{feat1}_x_{feat2}'] = df_out[feat1] * df_out[feat2]
-    # Selected third-order interactions among most important features (at most one time feature)
-    important_feats = [
-        'num_orders_rolling_mean_2', 'num_orders_rolling_mean_5', 'mean_orders_by_weekofyear',
-        'weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos',
-        'discount_pct', 'price_diff', 'emailer_for_promotion', 'homepage_featured'
-    ]
+
+    # Third-order interactions: one from each of three different groups (never more than one time feature)
     third_order_dict = {}
-    for i, f1 in enumerate(important_feats):
-        for j, f2 in enumerate(important_feats):
-            for k, f3 in enumerate(important_feats):
-                if i < j < k and all(f in df_out.columns for f in [f1, f2, f3]):
-                    if sum(f in time_feats for f in [f1, f2, f3]) <= 1:
-                        colname = f'{f1}_x_{f2}_x_{f3}'
-                        third_order_dict[colname] = df_out[f1] * df_out[f2] * df_out[f3]
-    # Only add new columns that do not already exist
+    for d in demand_feats:
+        for p in price_feats:
+            for m in promo_feats:
+                if all(f in df_out.columns for f in [d, p, m]):
+                    colname = f'{d}_x_{p}_x_{m}'
+                    third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m]
+    # Optionally, add a time feature (fourth-order) to the above, but only one per interaction
+    # Thoughtful fourth-order examples:
+    # 1. demand x price x promo x time (e.g., rolling mean x discount x promo x weekofyear_sin)
+    for d in demand_feats:
+        for p in price_feats:
+            for m in promo_feats:
+                for t in time_feats:
+                    if all(f in df_out.columns for f in [d, p, m, t]):
+                        # Only add a couple of the most interpretable fourth-order interactions
+                        if d == 'num_orders_rolling_mean_2' and p == 'discount_pct' and m == 'emailer_for_promotion' and t == 'weekofyear_sin':
+                            colname = f'{d}_x_{p}_x_{m}_x_{t}'
+                            third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m] * df_out[t]
+                        if d == 'meal_orders_mean' and p == 'price_diff' and m == 'homepage_featured' and t == 'month_cos':
+                            colname = f'{d}_x_{p}_x_{m}_x_{t}'
+                            third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m] * df_out[t]
+    # Additional thoughtful third- and fourth-order interactions
+    # 1. Demand × Promotion × Time
+    if all(f in df_out.columns for f in ['num_orders_rolling_mean_5', 'emailer_for_promotion', 'weekofyear_cos']):
+        third_order_dict['num_orders_rolling_mean_5_x_emailer_for_promotion_x_weekofyear_cos'] = (
+            df_out['num_orders_rolling_mean_5'] * df_out['emailer_for_promotion'] * df_out['weekofyear_cos'])
+    if all(f in df_out.columns for f in ['meal_orders_mean', 'homepage_featured', 'month_sin']):
+        third_order_dict['meal_orders_mean_x_homepage_featured_x_month_sin'] = (
+            df_out['meal_orders_mean'] * df_out['homepage_featured'] * df_out['month_sin'])
+    # 2. Demand × Price × Time
+    if all(f in df_out.columns for f in ['num_orders_rolling_mean_2', 'discount_pct', 'month_cos']):
+        third_order_dict['num_orders_rolling_mean_2_x_discount_pct_x_month_cos'] = (
+            df_out['num_orders_rolling_mean_2'] * df_out['discount_pct'] * df_out['month_cos'])
+    if all(f in df_out.columns for f in ['center_orders_mean', 'price_diff', 'weekofyear_sin']):
+        third_order_dict['center_orders_mean_x_price_diff_x_weekofyear_sin'] = (
+            df_out['center_orders_mean'] * df_out['price_diff'] * df_out['weekofyear_sin'])
+    # 3. Promotion × Price × Time
+    if all(f in df_out.columns for f in ['emailer_for_promotion', 'discount_pct', 'weekofyear_sin']):
+        third_order_dict['emailer_for_promotion_x_discount_pct_x_weekofyear_sin'] = (
+            df_out['emailer_for_promotion'] * df_out['discount_pct'] * df_out['weekofyear_sin'])
+    if all(f in df_out.columns for f in ['homepage_featured', 'price_diff', 'month_cos']):
+        third_order_dict['homepage_featured_x_price_diff_x_month_cos'] = (
+            df_out['homepage_featured'] * df_out['price_diff'] * df_out['month_cos'])
+    # 4. Demand × Price × Promotion × Time (fourth-order)
+    if all(f in df_out.columns for f in ['num_orders_rolling_mean_5', 'discount_pct', 'emailer_for_promotion', 'weekofyear_cos']):
+        third_order_dict['num_orders_rolling_mean_5_x_discount_pct_x_emailer_for_promotion_x_weekofyear_cos'] = (
+            df_out['num_orders_rolling_mean_5'] * df_out['discount_pct'] * df_out['emailer_for_promotion'] * df_out['weekofyear_cos'])
+    if all(f in df_out.columns for f in ['meal_orders_mean', 'price_diff', 'homepage_featured', 'month_sin']):
+        third_order_dict['meal_orders_mean_x_price_diff_x_homepage_featured_x_month_sin'] = (
+            df_out['meal_orders_mean'] * df_out['price_diff'] * df_out['homepage_featured'] * df_out['month_sin'])
+    # Add third- and selected fourth-order features
     new_cols = {k: v for k, v in third_order_dict.items() if k not in df_out.columns}
     if new_cols:
         df_out = pd.concat([df_out, pd.DataFrame(new_cols, index=df_out.index)], axis=1)
