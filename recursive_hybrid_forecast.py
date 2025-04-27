@@ -188,38 +188,68 @@ def create_advanced_interactions(df):
                         if d == 'num_orders_rolling_mean_2' and p == 'discount_pct' and m == 'emailer_for_promotion' and t == 'weekofyear_sin':
                             colname = f'{d}_x_{p}_x_{m}_x_{t}'
                             third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m] * df_out[t]
+                        if d == 'num_orders_rolling_mean_2' and p == 'discount_pct' and m == 'emailer_for_promotion' and t == 'weekofyear_cos':
+                            colname = f'{d}_x_{p}_x_{m}_x_{t}'
+                            third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m] * df_out[t]
+                        if d == 'meal_orders_mean' and p == 'price_diff' and m == 'homepage_featured' and t == 'month_sin':
+                            colname = f'{d}_x_{p}_x_{m}_x_{t}'
+                            third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m] * df_out[t]
                         if d == 'meal_orders_mean' and p == 'price_diff' and m == 'homepage_featured' and t == 'month_cos':
                             colname = f'{d}_x_{p}_x_{m}_x_{t}'
                             third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m] * df_out[t]
     # Additional thoughtful third- and fourth-order interactions
     # 1. Demand × Promotion × Time
+    if all(f in df_out.columns for f in ['num_orders_rolling_mean_5', 'emailer_for_promotion', 'weekofyear_sin']):
+        third_order_dict['num_orders_rolling_mean_5_x_emailer_for_promotion_x_weekofyear_sin'] = (
+            df_out['num_orders_rolling_mean_5'] * df_out['emailer_for_promotion'] * df_out['weekofyear_sin'])
     if all(f in df_out.columns for f in ['num_orders_rolling_mean_5', 'emailer_for_promotion', 'weekofyear_cos']):
         third_order_dict['num_orders_rolling_mean_5_x_emailer_for_promotion_x_weekofyear_cos'] = (
             df_out['num_orders_rolling_mean_5'] * df_out['emailer_for_promotion'] * df_out['weekofyear_cos'])
     if all(f in df_out.columns for f in ['meal_orders_mean', 'homepage_featured', 'month_sin']):
         third_order_dict['meal_orders_mean_x_homepage_featured_x_month_sin'] = (
             df_out['meal_orders_mean'] * df_out['homepage_featured'] * df_out['month_sin'])
+    if all(f in df_out.columns for f in ['meal_orders_mean', 'homepage_featured', 'month_cos']):
+        third_order_dict['meal_orders_mean_x_homepage_featured_x_month_cos'] = (
+            df_out['meal_orders_mean'] * df_out['homepage_featured'] * df_out['month_cos'])
     # 2. Demand × Price × Time
+    if all(f in df_out.columns for f in ['num_orders_rolling_mean_2', 'discount_pct', 'month_sin']):
+        third_order_dict['num_orders_rolling_mean_2_x_discount_pct_x_month_sin'] = (
+            df_out['num_orders_rolling_mean_2'] * df_out['discount_pct'] * df_out['month_sin'])
     if all(f in df_out.columns for f in ['num_orders_rolling_mean_2', 'discount_pct', 'month_cos']):
         third_order_dict['num_orders_rolling_mean_2_x_discount_pct_x_month_cos'] = (
             df_out['num_orders_rolling_mean_2'] * df_out['discount_pct'] * df_out['month_cos'])
     if all(f in df_out.columns for f in ['center_orders_mean', 'price_diff', 'weekofyear_sin']):
         third_order_dict['center_orders_mean_x_price_diff_x_weekofyear_sin'] = (
             df_out['center_orders_mean'] * df_out['price_diff'] * df_out['weekofyear_sin'])
+    if all(f in df_out.columns for f in ['center_orders_mean', 'price_diff', 'weekofyear_cos']):
+        third_order_dict['center_orders_mean_x_price_diff_x_weekofyear_cos'] = (
+            df_out['center_orders_mean'] * df_out['price_diff'] * df_out['weekofyear_cos'])
     # 3. Promotion × Price × Time
     if all(f in df_out.columns for f in ['emailer_for_promotion', 'discount_pct', 'weekofyear_sin']):
         third_order_dict['emailer_for_promotion_x_discount_pct_x_weekofyear_sin'] = (
             df_out['emailer_for_promotion'] * df_out['discount_pct'] * df_out['weekofyear_sin'])
+    if all(f in df_out.columns for f in ['emailer_for_promotion', 'discount_pct', 'weekofyear_cos']):
+        third_order_dict['emailer_for_promotion_x_discount_pct_x_weekofyear_cos'] = (
+            df_out['emailer_for_promotion'] * df_out['discount_pct'] * df_out['weekofyear_cos'])
+    if all(f in df_out.columns for f in ['homepage_featured', 'price_diff', 'month_sin']):
+        third_order_dict['homepage_featured_x_price_diff_x_month_sin'] = (
+            df_out['homepage_featured'] * df_out['price_diff'] * df_out['month_sin'])
     if all(f in df_out.columns for f in ['homepage_featured', 'price_diff', 'month_cos']):
         third_order_dict['homepage_featured_x_price_diff_x_month_cos'] = (
             df_out['homepage_featured'] * df_out['price_diff'] * df_out['month_cos'])
     # 4. Demand × Price × Promotion × Time (fourth-order)
+    if all(f in df_out.columns for f in ['num_orders_rolling_mean_5', 'discount_pct', 'emailer_for_promotion', 'weekofyear_sin']):
+        third_order_dict['num_orders_rolling_mean_5_x_discount_pct_x_emailer_for_promotion_x_weekofyear_sin'] = (
+            df_out['num_orders_rolling_mean_5'] * df_out['discount_pct'] * df_out['emailer_for_promotion'] * df_out['weekofyear_sin'])
     if all(f in df_out.columns for f in ['num_orders_rolling_mean_5', 'discount_pct', 'emailer_for_promotion', 'weekofyear_cos']):
         third_order_dict['num_orders_rolling_mean_5_x_discount_pct_x_emailer_for_promotion_x_weekofyear_cos'] = (
             df_out['num_orders_rolling_mean_5'] * df_out['discount_pct'] * df_out['emailer_for_promotion'] * df_out['weekofyear_cos'])
     if all(f in df_out.columns for f in ['meal_orders_mean', 'price_diff', 'homepage_featured', 'month_sin']):
         third_order_dict['meal_orders_mean_x_price_diff_x_homepage_featured_x_month_sin'] = (
             df_out['meal_orders_mean'] * df_out['price_diff'] * df_out['homepage_featured'] * df_out['month_sin'])
+    if all(f in df_out.columns for f in ['meal_orders_mean', 'price_diff', 'homepage_featured', 'month_cos']):
+        third_order_dict['meal_orders_mean_x_price_diff_x_homepage_featured_x_month_cos'] = (
+            df_out['meal_orders_mean'] * df_out['price_diff'] * df_out['homepage_featured'] * df_out['month_cos'])
     # Add third- and selected fourth-order features
     new_cols = {k: v for k, v in third_order_dict.items() if k not in df_out.columns}
     if new_cols:
@@ -358,248 +388,8 @@ logging.info(f"Using {len(FEATURES)} features: {FEATURES}")
 
 
 # --- Remove manually identified highly correlated features ---
-features_to_remove = [
-  'base_price',
-  'discount',
-  'num_orders_rolling_mean_3',
-  'num_orders_rolling_mean_5',
-  'num_orders_rolling_std_5',
-  'num_orders_rolling_mean_6',
-  'num_orders_rolling_mean_7',
-  'num_orders_rolling_std_7',
-  'num_orders_rolling_mean_8',
-  'num_orders_rolling_std_10',
-  'num_orders_rolling_mean_12',
-  'num_orders_rolling_std_12',
-  'num_orders_rolling_mean_14',
-  'num_orders_rolling_mean_21',
-  'price_diff_x_emailer',
-  'checkout_price_sq',
-  'emailer_for_promotion_sq',
-  'homepage_featured_sq',
-  'num_orders_rolling_mean_2_x_emailer_for_promotion',
-  'num_orders_rolling_mean_2_x_homepage_featured',
-  'price_diff_x_emailer_for_promotion',
-  'price_diff_x_homepage_featured',
-  'num_orders_rolling_mean_2_x_discount_pct_x_homepage_featured',
-  'center_orders_mean',
-  'center_orders_mean_cube',
-  'meal_orders_mean',
-  'meal_orders_mean_cube',
-  # Added from SHAP importances for further testing:
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_14',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5',
-  'num_orders_rolling_mean_2_x_meal_orders_mean',
-  'meal_orders_mean_x_center_orders_mean',
-  'num_orders_rolling_mean_2_x_center_orders_mean',
-  'checkout_price',
-  'num_orders_rolling_mean_2',
-  'mean_orders_by_weekofyear',
-  'num_orders_rolling_mean_5_x_num_orders_rolling_mean_14',
-  'num_orders_rolling_mean_4',
-  'meal_orders_mean_x_homepage_featured',
-  'num_orders_rolling_mean_2_sq',
-  'homepage_featured_rolling_sum_3',
-  'num_orders_rolling_mean_21',
-  'num_orders_rolling_mean_5_x_meal_orders_mean',
-  'meal_orders_mean_x_emailer_for_promotion',
-  'checkout_price_sq',
-  'meal_orders_mean_sq',
-  'num_orders_rolling_mean_28',
-  'meal_orders_std',
-  'num_orders_rolling_mean_2_x_checkout_price',
-  'meal_orders_mean_x_discount_pct',
-  'category_Beverages',
-  'num_orders_rolling_mean_5_x_discount_pct_x_emailer_for_promotion',
-  'num_orders_rolling_mean_2_x_price_diff_x_emailer_for_promotion',
-  'emailer_for_promotion_rolling_sum_3',
-  'base_price',
-  'num_orders_rolling_std_14',
-  'num_orders_rolling_mean_14_x_weekofyear',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_price_diff',
-  'num_orders_rolling_mean_14_x_meal_orders_mean',
-  'price_diff',
-  'meal_orders_mean_x_checkout_price',
-  'meal_orders_mean_x_weekofyear',
-  'num_orders_rolling_mean_5_x_center_orders_mean',
-  'discount_pct_x_emailer_for_promotion',
-  'meal_orders_mean',
-  'checkout_price_x_homepage_featured',
-  'num_orders_rolling_mean_14_x_discount_pct',
-  'checkout_price_x_price_diff',
-  'center_orders_mean_x_discount_pct',
-  'num_orders_rolling_mean_10',
-  'checkout_price_x_weekofyear',
-  'num_orders_rolling_mean_14_x_center_orders_mean',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_discount_pct',
-  'weekofyear_sq',
-  'num_orders_rolling_mean_2_x_discount_pct_x_emailer_for_promotion',
-  'mean_orders_by_month',
-  'center_orders_std',
-  'num_orders_rolling_std_21',
-  'num_orders_rolling_mean_14_x_checkout_price',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_month_cos',
-  'num_orders_rolling_mean_14_x_emailer_for_promotion',
-  'num_orders_rolling_mean_2_x_weekofyear',
-  'num_orders_rolling_mean_3',
-  'num_orders_rolling_std_2',
-  'num_orders_rolling_mean_14_x_price_diff',
-  'discount_pct_x_weekofyear',
-  'num_orders_rolling_mean_5_x_checkout_price',
-  'num_orders_rolling_mean_2_x_discount_pct_x_homepage_featured',
-  'center_orders_mean_x_emailer_for_promotion',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_emailer_for_promotion',
-  'center_orders_mean_sq',
-  'weekofyear_sin',
-  'num_orders_rolling_mean_5',
-  'weekofyear_cos',
-  'center_orders_mean_x_homepage_featured',
-  'num_orders_rolling_mean_5_x_discount_pct_x_homepage_featured',
-  'num_orders_rolling_mean_5_x_discount_pct',
-  'price_diff_sq',
-  'num_orders_rolling_mean_5_x_emailer_for_promotion',
-  'checkout_price_x_emailer_for_promotion',
-  'num_orders_rolling_std_28',
-  'num_orders_rolling_std_6',
-  'weekofyear_x_emailer_for_promotion',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_month_sin',
-  'center_type_TYPE_B',
-  'num_orders_rolling_std_12',
-  'cuisine_Italian',
-  'cuisine_Continental',
-  'num_orders_rolling_std_3',
-  'num_orders_rolling_mean_5_x_price_diff_x_emailer_for_promotion',
-  'num_orders_rolling_mean_5_x_homepage_featured',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_weekofyear_sin',
-  'category_Extras',
-  'month_sin_x_discount_pct_x_emailer_for_promotion',
-  'num_orders_rolling_std_7',
-  'num_orders_rolling_mean_5_x_discount_pct_x_price_diff',
-  'discount_pct_x_homepage_featured',
-  'num_orders_rolling_mean_5_x_weekofyear',
-  'category_Rice Bowl',
-  'discount_pct_sq',
-  'num_orders_rolling_mean_8',
-  'num_orders_rolling_std_8',
-  'cuisine_Thai',
-  'price_diff_x_discount_pct',
-  'discount_pct_x_price_diff_x_emailer_for_promotion',
-  'month_sin',
-  'checkout_price_x_discount_pct',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_homepage_featured',
-  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_weekofyear_cos',
-  'center_type_TYPE_C',
-  'meal_orders_mean_x_price_diff',
-  'num_orders_rolling_mean_2_x_discount_pct',
-  'discount',
-  'num_orders_rolling_mean_2_x_price_diff',
-  'num_orders_rolling_mean_14',
-  'discount_pct_x_emailer_for_promotion_x_homepage_featured',
-  'category_Salad',
-  'num_orders_rolling_mean_12',
-  'weekofyear_x_homepage_featured',
-  'center_orders_mean_x_price_diff',
-  'month_cos',
-  'center_orders_mean_x_checkout_price',
-  'discount_pct',
-  'num_orders_rolling_std_10',
-  'num_orders_rolling_mean_14_x_homepage_featured',
-  'num_orders_rolling_mean_2_x_weekofyear_sin_x_price_diff',
-  'rolling_mean_2_x_home',
-  'num_orders_rolling_std_5',
-  'num_orders_rolling_mean_5_x_month_sin_x_price_diff',
-  'price_diff_x_weekofyear',
-  'num_orders_rolling_mean_5_x_price_diff_x_homepage_featured',
-  'emailer_for_promotion',
-  'num_orders_rolling_mean_5_x_weekofyear_cos_x_discount_pct',
-  'num_orders_rolling_mean_5_x_month_sin_x_emailer_for_promotion',
-  'is_outlier_weekofyear',
-  'weekofyear_sin_x_emailer_for_promotion_x_homepage_featured',
-  'num_orders_rolling_mean_2_x_month_cos_x_discount_pct',
-  'center_orders_mean_x_weekofyear',
-  'price_diff_x_emailer',
-  'num_orders_rolling_mean_5_x_month_cos_x_emailer_for_promotion',
-  'num_orders_rolling_mean_5_x_emailer_for_promotion_x_homepage_featured',
-  'weekofyear_sin_x_discount_pct_x_price_diff',
-  'num_orders_rolling_mean_5_x_month_sin_x_discount_pct',
-  'num_orders_rolling_mean_5_x_weekofyear_sin_x_price_diff',
-  'num_orders_rolling_mean_2_x_month_sin_x_price_diff',
-  'weekofyear_cos_x_discount_pct_x_emailer_for_promotion',
-  'num_orders_rolling_mean_5_sq',
-  'num_orders_rolling_mean_2_x_month_sin_x_discount_pct',
-  'num_orders_rolling_mean_7',
-  'num_orders_rolling_mean_2_x_weekofyear_sin_x_discount_pct',
-  'num_orders_rolling_std_4',
-  'num_orders_rolling_mean_5_x_month_cos_x_price_diff',
-  'num_orders_rolling_mean_6',
-  'num_orders_rolling_mean_2_x_weekofyear_cos_x_price_diff',
-  'category_Sandwich',
-  'num_orders_rolling_mean_2_x_emailer_for_promotion_x_homepage_featured',
-  'num_orders_rolling_mean_2_x_weekofyear_cos_x_discount_pct',
-  'num_orders_rolling_mean_2_x_month_cos_x_price_diff',
-  'num_orders_rolling_mean_5_x_weekofyear_sin_x_emailer_for_promotion',
-  'num_orders_rolling_mean_5_x_price_diff',
-  'weekofyear_sin_x_price_diff_x_emailer_for_promotion',
-  'month_sin_x_discount_pct_x_price_diff',
-  'num_orders_rolling_mean_2_x_price_diff_x_homepage_featured',
-  'category_Other Snacks',
-  'num_orders_rolling_mean_5_x_month_cos_x_discount_pct',
-  'num_orders_rolling_mean_2_x_homepage_featured',
-  'num_orders_rolling_mean_5_x_weekofyear_cos_x_price_diff',
-  'num_orders_rolling_mean_5_x_weekofyear_sin_x_discount_pct',
-  'num_orders_rolling_mean_5_x_month_cos_x_homepage_featured',
-  'num_orders_rolling_mean_2_x_month_sin_x_emailer_for_promotion',
-  'num_orders_rolling_mean_2_x_month_cos_x_emailer_for_promotion',
-  'num_orders_rolling_mean_2_x_discount_pct_x_price_diff',
-  'price_diff_x_home',
-  'num_orders_rolling_mean_14_sq',
-  'weekofyear_sin_x_discount_pct_x_emailer_for_promotion',
-  'center_orders_mean',
-  'num_orders_rolling_mean_2_x_month_cos_x_homepage_featured',
-  'month_cos_x_discount_pct_x_price_diff',
-  'weekofyear_cos_x_discount_pct_x_homepage_featured',
-  'weekofyear_sin_x_discount_pct_x_homepage_featured',
-  'cuisine_Indian',
-  'center_type_TYPE_A',
-  'rolling_mean_2_x_emailer',
-  'category_Starters',
-  'center_orders_mean_cube',
-  'meal_orders_mean_cube',
-  'weekofyear_cos_x_discount_pct_x_price_diff',
-  'discount_pct_x_price_diff_x_homepage_featured',
-  'num_orders_rolling_mean_5_x_month_sin_x_homepage_featured',
-  'weekofyear_cos_x_price_diff_x_emailer_for_promotion',
-  'weekofyear_sin_x_price_diff_x_homepage_featured',
-  'month_cos_x_price_diff_x_emailer_for_promotion',
-  'num_orders_rolling_mean_5_x_weekofyear_cos_x_homepage_featured',
-  'num_orders_rolling_mean_5_x_weekofyear_cos_x_emailer_for_promotion',
-  'num_orders_rolling_mean_2_x_weekofyear_sin_x_homepage_featured',
-  'num_orders_rolling_mean_2_x_weekofyear_cos_x_emailer_for_promotion',
-  'num_orders_rolling_mean_5_x_weekofyear_sin_x_homepage_featured',
-  'month_cos_x_discount_pct_x_homepage_featured',
-  'month_sin_x_price_diff_x_emailer_for_promotion',
-  'weekofyear_cos_x_emailer_for_promotion_x_homepage_featured',
-  'month_sin_x_price_diff_x_homepage_featured',
-  'weekofyear_cos_x_price_diff_x_homepage_featured',
-  'month_cos_x_price_diff_x_homepage_featured',
-  'category_Seafood',
-  'category_Pizza',
-  'category_Desert',
-  'num_orders_rolling_mean_2_x_emailer_for_promotion',
-  'category_Fish',
-  'month_cos_x_emailer_for_promotion_x_homepage_featured',
-  'price_diff_x_homepage_featured',
-  'month_sin_x_emailer_for_promotion_x_homepage_featured',
-  'is_outlier_month',
-  'category_Soup',
-  'emailer_for_promotion_sq',
-  'category_Pasta',
-  'homepage_featured',
-  'homepage_featured_sq',
-  'emailer_for_promotion_x_homepage_featured',
-  'category_Biryani',
-]
-# FEATURES = [f for f in FEATURES if f not in features_to_remove]
+features_to_remove = []
+FEATURES = [f for f in FEATURES if f not in features_to_remove]
 logging.info(f"Removed manually identified correlated features. {len(FEATURES)} features remain.")
 
 # --- Train/validation split ---
