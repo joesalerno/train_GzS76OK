@@ -164,9 +164,11 @@ def create_advanced_interactions(df):
                     colname = f'{feat1}_x_{feat2}'
                     pairwise_dict[colname] = df_out[feat1] * df_out[feat2]
     if pairwise_dict:
-        df_out = pd.concat([df_out, pd.DataFrame(pairwise_dict, index=df_out.index)], axis=1)
+        new_pairwise = {k: v for k, v in pairwise_dict.items() if k not in df_out.columns}
+        if new_pairwise:
+            df_out = pd.concat([df_out, pd.DataFrame(new_pairwise, index=df_out.index)], axis=1)
 
-    # Third-order interactions: one from each of three different groups (never more than one time feature)
+    # Third-order and fourth-order interactions (same logic)
     third_order_dict = {}
     for d in demand_feats:
         for p in price_feats:
@@ -254,18 +256,14 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
         "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home",
         "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_cube", "_mean", "_std"
     ])]
-    # Only fill columns that exist in the DataFrame and have the correct length
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
-    # Remove duplicate columns to avoid reindex error before NaN filling
-    df_out = df_out.loc[:, ~df_out.columns.duplicated()]
     if cols_to_fill:
-        # Deduplicate again right before assignment, in case new dups were introduced
-        df_out = df_out.loc[:, ~df_out.columns.duplicated()]
         df_out.loc[:, cols_to_fill] = df_out[cols_to_fill].fillna(0)
     if "discount_pct" in df_out.columns:
         df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
-    # Defragment DataFrame to avoid future fragmentation issues
+    # Defragment and deduplicate DataFrame ONCE at the end
     df_out = df_out.copy()
+    df_out = df_out.loc[:, ~df_out.columns.duplicated()]
     return df_out, weekofyear_means, month_means
 
 # --- One-hot encoding and feature engineering for train/test ---
