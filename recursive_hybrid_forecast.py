@@ -725,89 +725,89 @@ final_params.update(best_params) # Best params from Optuna override defaults
 
 
 # --- Feature Removal Experiment ---
-def feature_removal_experiment(train_df, valid_df, FEATURES, features_to_test, TARGET, model_params, n_trials=1):
-    """
-    For each feature in features_to_test, remove it from FEATURES, retrain, and report validation RMSLE.
-    Returns a DataFrame with feature, RMSLE, and delta vs. baseline.
-    """
-    results = []
-    # Baseline
-    model = LGBMRegressor(**model_params)
-    model.fit(train_df[FEATURES], train_df[TARGET])
-    preds = model.predict(valid_df[FEATURES])
-    baseline_rmsle = rmsle(valid_df[TARGET], preds)
-    results.append({'feature': 'BASELINE', 'rmsle': baseline_rmsle, 'delta_vs_baseline': 0.0})
-    # Test each feature
-    for feat in tqdm(features_to_test, desc='Feature Removal Experiment'):
-        if feat not in FEATURES:
-            continue
-        test_features = [f for f in FEATURES if f != feat]
-        model = LGBMRegressor(**model_params)
-        model.fit(train_df[test_features], train_df[TARGET])
-        preds = model.predict(valid_df[test_features])
-        rmsle_score = rmsle(valid_df[TARGET], preds)
-        results.append({'feature': feat, 'rmsle': rmsle_score, 'delta_vs_baseline': rmsle_score - baseline_rmsle})
-    results_df = pd.DataFrame(results)
-    results_df = results_df.sort_values('rmsle')
-    results_df.to_csv('feature_removal_experiment.csv', index=False)
-    print('Feature removal experiment results saved to feature_removal_experiment.csv')
-    return results_df
+# def feature_removal_experiment(train_df, valid_df, FEATURES, features_to_test, TARGET, model_params, n_trials=1):
+#     """
+#     For each feature in features_to_test, remove it from FEATURES, retrain, and report validation RMSLE.
+#     Returns a DataFrame with feature, RMSLE, and delta vs. baseline.
+#     """
+#     results = []
+#     # Baseline
+#     model = LGBMRegressor(**model_params)
+#     model.fit(train_df[FEATURES], train_df[TARGET])
+#     preds = model.predict(valid_df[FEATURES])
+#     baseline_rmsle = rmsle(valid_df[TARGET], preds)
+#     results.append({'feature': 'BASELINE', 'rmsle': baseline_rmsle, 'delta_vs_baseline': 0.0})
+#     # Test each feature
+#     for feat in tqdm(features_to_test, desc='Feature Removal Experiment'):
+#         if feat not in FEATURES:
+#             continue
+#         test_features = [f for f in FEATURES if f != feat]
+#         model = LGBMRegressor(**model_params)
+#         model.fit(train_df[test_features], train_df[TARGET])
+#         preds = model.predict(valid_df[test_features])
+#         rmsle_score = rmsle(valid_df[TARGET], preds)
+#         results.append({'feature': feat, 'rmsle': rmsle_score, 'delta_vs_baseline': rmsle_score - baseline_rmsle})
+#     results_df = pd.DataFrame(results)
+#     results_df = results_df.sort_values('rmsle')
+#     results_df.to_csv('feature_removal_experiment.csv', index=False)
+#     print('Feature removal experiment results saved to feature_removal_experiment.csv')
+#     return results_df
 
-# --- Run Feature Removal Experiment ---
-features_to_test = features_to_remove
-model_params = final_params.copy()
-model_params['n_estimators'] = 500 # Use fewer estimators for speed
-feature_removal_experiment(train_split_df, valid_df, FEATURES, features_to_test, TARGET, model_params)
+# # --- Run Feature Removal Experiment ---
+# features_to_test = features_to_remove
+# model_params = final_params.copy()
+# model_params['n_estimators'] = 500 # Use fewer estimators for speed
+# feature_removal_experiment(train_split_df, valid_df, FEATURES, features_to_test, TARGET, model_params)
 
 
 
 # --- Cross-Validation Feature Removal Experiment ---
-from sklearn.model_selection import KFold
+# from sklearn.model_selection import KFold
 
-def crossval_feature_removal_experiment(df, FEATURES, features_to_test, TARGET, model_params, n_splits=5):
-    """
-    For each feature in features_to_test, remove it from FEATURES, run KFold CV, and report mean/STD RMSLE.
-    Returns a DataFrame with feature, mean RMSLE, std RMSLE, and delta vs. baseline.
-    """
-    results = []
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=SEED)
-    # Baseline
-    baseline_scores = []
-    for train_idx, valid_idx in tqdm(list(kf.split(df)), desc='CV Baseline'):
-        train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
-        model = LGBMRegressor(**model_params)
-        model.fit(train_fold[FEATURES], train_fold[TARGET])
-        preds = model.predict(valid_fold[FEATURES])
-        baseline_scores.append(rmsle(valid_fold[TARGET], preds))
-    baseline_mean = np.mean(baseline_scores)
-    baseline_std = np.std(baseline_scores)
-    results.append({'feature': 'BASELINE', 'mean_rmsle': baseline_mean, 'std_rmsle': baseline_std, 'delta_vs_baseline': 0.0})
-    # Test each feature
-    for feat in tqdm(features_to_test, desc='CV Feature Removal'):
-        if feat not in FEATURES:
-            continue
-        test_features = [f for f in FEATURES if f != feat]
-        scores = []
-        for train_idx, valid_idx in kf.split(df):
-            train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
-            model = LGBMRegressor(**model_params)
-            model.fit(train_fold[test_features], train_fold[TARGET])
-            preds = model.predict(valid_fold[test_features])
-            scores.append(rmsle(valid_fold[TARGET], preds))
-        mean_score = np.mean(scores)
-        std_score = np.std(scores)
-        results.append({'feature': feat, 'mean_rmsle': mean_score, 'std_rmsle': std_score, 'delta_vs_baseline': mean_score - baseline_mean})
-    results_df = pd.DataFrame(results)
-    results_df = results_df.sort_values('mean_rmsle')
-    results_df.to_csv('crossval_feature_removal_experiment.csv', index=False)
-    print('Cross-validation feature removal experiment results saved to crossval_feature_removal_experiment.csv')
-    return results_df
+# def crossval_feature_removal_experiment(df, FEATURES, features_to_test, TARGET, model_params, n_splits=5):
+#     """
+#     For each feature in features_to_test, remove it from FEATURES, run KFold CV, and report mean/STD RMSLE.
+#     Returns a DataFrame with feature, mean RMSLE, std RMSLE, and delta vs. baseline.
+#     """
+#     results = []
+#     kf = KFold(n_splits=n_splits, shuffle=True, random_state=SEED)
+#     # Baseline
+#     baseline_scores = []
+#     for train_idx, valid_idx in tqdm(list(kf.split(df)), desc='CV Baseline'):
+#         train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
+#         model = LGBMRegressor(**model_params)
+#         model.fit(train_fold[FEATURES], train_fold[TARGET])
+#         preds = model.predict(valid_fold[FEATURES])
+#         baseline_scores.append(rmsle(valid_fold[TARGET], preds))
+#     baseline_mean = np.mean(baseline_scores)
+#     baseline_std = np.std(baseline_scores)
+#     results.append({'feature': 'BASELINE', 'mean_rmsle': baseline_mean, 'std_rmsle': baseline_std, 'delta_vs_baseline': 0.0})
+#     # Test each feature
+#     for feat in tqdm(features_to_test, desc='CV Feature Removal'):
+#         if feat not in FEATURES:
+#             continue
+#         test_features = [f for f in FEATURES if f != feat]
+#         scores = []
+#         for train_idx, valid_idx in kf.split(df):
+#             train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
+#             model = LGBMRegressor(**model_params)
+#             model.fit(train_fold[test_features], train_fold[TARGET])
+#             preds = model.predict(valid_fold[test_features])
+#             scores.append(rmsle(valid_fold[TARGET], preds))
+#         mean_score = np.mean(scores)
+#         std_score = np.std(scores)
+#         results.append({'feature': feat, 'mean_rmsle': mean_score, 'std_rmsle': std_score, 'delta_vs_baseline': mean_score - baseline_mean})
+#     results_df = pd.DataFrame(results)
+#     results_df = results_df.sort_values('mean_rmsle')
+#     results_df.to_csv('crossval_feature_removal_experiment.csv', index=False)
+#     print('Cross-validation feature removal experiment results saved to crossval_feature_removal_experiment.csv')
+#     return results_df
 
 # --- Run Cross-Validation Feature Removal Experiment ---
-features_to_test = features_to_remove
-model_params = get_lgbm().get_params()
-model_params['n_estimators'] = 300 # Use fewer estimators for speed
-crossval_feature_removal_experiment(train_split_df, FEATURES, features_to_test, TARGET, model_params, n_splits=5)
+# features_to_test = features_to_remove
+# model_params = get_lgbm().get_params()
+# model_params['n_estimators'] = 300 # Use fewer estimators for speed
+# crossval_feature_removal_experiment(train_split_df, FEATURES, features_to_test, TARGET, model_params, n_splits=5)
 
 
 
@@ -1014,3 +1014,33 @@ final_predictions_df['num_orders_ensemble'] = ensemble_preds
 submission_path_ensemble = f"{SUBMISSION_FILE_PREFIX}_optuna_ensemble.csv"
 final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble, index=False)
 logging.info(f"Ensemble submission file saved to {submission_path_ensemble}")
+
+# --- Optuna Feature Selection ---
+import optuna
+from sklearn.model_selection import KFold
+
+def optuna_feature_selection_objective(trial):
+    # Use a binary mask for each feature
+    selected_features = [f for f in FEATURES if trial.suggest_categorical(f, [True, False])]
+    if len(selected_features) < 10:  # Avoid too few features
+        return float('inf')
+    kf = KFold(n_splits=3, shuffle=True, random_state=SEED)
+    scores = []
+    for train_idx, valid_idx in kf.split(train_split_df):
+        model = get_lgbm(final_params).set_params(n_estimators=300)
+        model.fit(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET])
+        preds = model.predict(train_split_df.iloc[valid_idx][selected_features])
+        scores.append(rmsle(train_split_df.iloc[valid_idx][TARGET], preds))
+    return np.mean(scores)
+
+# --- Optuna Feature Selection ---
+logging.info("Starting Optuna feature selection...")
+feature_selection_study = optuna.create_study(direction="minimize")
+feature_selection_study.optimize(optuna_feature_selection_objective, n_trials=40, timeout=3600)
+
+best_mask = [feature_selection_study.best_trial.params.get(f, False) for f in FEATURES]
+SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
+logging.info(f"Optuna-selected features ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
+
+# Use SELECTED_FEATURES for final model and ensemble
+FEATURES = SELECTED_FEATURES
