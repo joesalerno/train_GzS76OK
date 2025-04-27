@@ -16,7 +16,8 @@ MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
 LAG_WEEKS = [1, 2, 3, 5, 10]
-ROLLING_WINDOWS = [2, 3, 4, 5, 7, 14]
+# Use a single rolling window configuration for clarity
+ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 # Other features (not directly dependent on recursive prediction)
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
@@ -59,110 +60,66 @@ if 'num_orders' not in test.columns:
     test['num_orders'] = np.nan
 
 # --- Feature Engineering ---
-logging.info("Creating features...")
+logging.info("Creating features (IMPROVED)...")
 GROUP_COLS = ["center_id", "meal_id"]
 
+# Add cyclical encoding for weekofyear and month
+from math import pi
+def create_temporal_features(df):
+    df_out = df.copy()
+    df_out["weekofyear"] = df_out["week"] % 52
+    df_out["weekofyear_sin"] = np.sin(2 * pi * df_out["weekofyear"] / 52)
+    df_out["weekofyear_cos"] = np.cos(2 * pi * df_out["weekofyear"] / 52)
+    if "month" not in df_out.columns:
+        df_out["month"] = ((df_out["week"] - 1) // 4) % 12 + 1
+    df_out["month_sin"] = np.sin(2 * pi * df_out["month"] / 12)
+    df_out["month_cos"] = np.cos(2 * pi * df_out["month"] / 12)
+    # Example holiday weeks (customize as needed)
+    holiday_weeks = set([1, 10, 25, 45, 52])
+    df_out["is_holiday_week"] = df_out["weekofyear"].isin(holiday_weeks).astype(int)
+    return df_out
+
 def create_lag_rolling_features(df, target_col='num_orders', lag_weeks=LAG_WEEKS, rolling_windows=ROLLING_WINDOWS):
-    """Creates lag and rolling window features for a given target column."""
     df_out = df.copy()
     group = df_out.groupby(GROUP_COLS)
-
-    # Lags
     for lag in lag_weeks:
         df_out[f"{target_col}_lag_{lag}"] = group[target_col].shift(lag)
-
-    # Rolling features (use shift(1) to avoid data leakage)
     shifted = group[target_col].shift(1)
     for window in rolling_windows:
         df_out[f"{target_col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
         df_out[f"{target_col}_rolling_std_{window}"] = shifted.rolling(window, min_periods=1).std().reset_index(drop=True)
-
     return df_out
 
 def create_other_features(df):
-    """Creates features not directly dependent on recursive prediction."""
     df_out = df.copy()
     group = df_out.groupby(GROUP_COLS)
-
-    # Price features
     df_out["discount"] = df_out["base_price"] - df_out["checkout_price"]
-    df_out["discount_pct"] = df_out["discount"] / df_out["base_price"].replace(0, np.nan) # Avoid division by zero
+    df_out["discount_pct"] = df_out["discount"] / df_out["base_price"].replace(0, np.nan)
     df_out["price_diff"] = group["checkout_price"].diff()
-
-    # Rolling sums for promo/featured (use shift(1))
     for col in OTHER_ROLLING_SUM_COLS:
         shifted = group[col].shift(1)
         df_out[f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}"] = shifted.rolling(OTHER_ROLLING_SUM_WINDOW, min_periods=1).sum().reset_index(drop=True)
-
-    # Time features
-    df_out["weekofyear"] = df_out["week"] % 52
-
     return df_out
 
 def create_group_aggregates(df):
     df_out = df.copy()
     # Center-level aggregates
     df_out['center_orders_mean'] = df_out.groupby('center_id')['num_orders'].transform('mean')
-    # df_out['center_orders_median'] = df_out.groupby('center_id')['num_orders'].transform('median')
     df_out['center_orders_std'] = df_out.groupby('center_id')['num_orders'].transform('std')
     # Meal-level aggregates
     df_out['meal_orders_mean'] = df_out.groupby('meal_id')['num_orders'].transform('mean')
-    # df_out['meal_orders_median'] = df_out.groupby('meal_id')['num_orders'].transform('median')
     df_out['meal_orders_std'] = df_out.groupby('meal_id')['num_orders'].transform('std')
     # Category-level aggregates (if available)
     if 'category' in df_out.columns:
         df_out['category_orders_mean'] = df_out.groupby('category')['num_orders'].transform('mean')
-        # df_out['category_orders_median'] = df_out.groupby('category')['num_orders'].transform('median')
         df_out['category_orders_std'] = df_out.groupby('category')['num_orders'].transform('std')
     return df_out
 
-def create_advanced_interactions(df):
-    df_out = df.copy()
-    # Identify top features for nonlinear transforms and interactions
-    top_features = [
-        'num_orders_rolling_mean_2',
-        'num_orders_rolling_mean_5',
-        'num_orders_rolling_mean_14',
-        'meal_orders_mean',
-        'center_orders_mean',
-        'meal_orders_std',
-        'rolling_mean_2_sq',
-        'checkout_price',
-        'price_diff_x_emailer',
-        'rolling_mean_2_x_emailer',
-    ]
-    # Nonlinear transforms: square, log1p (where appropriate)
-    for feat in top_features:
-        if feat in df_out.columns:
-            df_out[f'{feat}_sq'] = df_out[feat] ** 2
-            # Only apply log1p to strictly positive features
-            if (df_out[feat] > 0).any():
-                df_out[f'{feat}_log1p'] = np.log1p(np.clip(df_out[feat], a_min=0, a_max=None))
-    # Advanced interactions: pairwise products of top rolling means and aggregates
-    interaction_pairs = [
-        ('num_orders_rolling_mean_2', 'checkout_price'),
-        ('num_orders_rolling_mean_5', 'emailer_for_promotion'),
-        ('num_orders_rolling_mean_14', 'homepage_featured'),
-        ('meal_orders_mean', 'discount_pct'),
-        ('center_orders_mean', 'price_diff'),
-        ('meal_orders_mean', 'weekofyear'),
-        ('num_orders_rolling_mean_2', 'meal_orders_mean'),
-        ('num_orders_rolling_mean_5', 'center_orders_mean'),
-    ]
-    for feat1, feat2 in interaction_pairs:
-        if feat1 in df_out.columns and feat2 in df_out.columns:
-            df_out[f'{feat1}_x_{feat2}'] = df_out[feat1] * df_out[feat2]
-    return df_out
-
 def create_interaction_features(df):
-    """Creates interaction features."""
     df_out = df.copy()
     interactions = {
         "price_diff_x_emailer": ("price_diff", "emailer_for_promotion"),
-        "lag1_x_emailer": ("num_orders_lag_1", "emailer_for_promotion"),
         "price_diff_x_home": ("price_diff", "homepage_featured"),
-        "lag1_x_home": ("num_orders_lag_1", "homepage_featured"),
-        # New rolling mean 2 interactions
         "rolling_mean_2_x_emailer": ("num_orders_rolling_mean_2", "emailer_for_promotion"),
         "rolling_mean_2_x_home": ("num_orders_rolling_mean_2", "homepage_featured"),
     }
@@ -170,32 +127,61 @@ def create_interaction_features(df):
         if feat1 in df_out.columns and feat2 in df_out.columns:
             df_out[name] = df_out[feat1] * df_out[feat2]
         else:
-            logging.warning(f"Skipping interaction '{name}' because base feature(s) missing.")
-            df_out[name] = 0 # Add column with default value if base features missing
-
+            df_out[name] = 0
     return df_out
 
-def apply_feature_engineering(df, is_train=True):
-    """Applies all feature engineering steps consistently for both train and test."""
+def create_advanced_interactions(df):
     df_out = df.copy()
+    # Top features for polynomial and interaction terms
+    top_feats = [
+        'num_orders_rolling_mean_2', 'num_orders_rolling_mean_5', 'num_orders_rolling_mean_14',
+        'meal_orders_mean', 'center_orders_mean', 'checkout_price', 'price_diff', 'discount_pct',
+        'weekofyear', 'emailer_for_promotion', 'homepage_featured'
+    ]
+    # Polynomial features (squared, cubic)
+    for feat in top_feats:
+        if feat in df_out.columns:
+            df_out[f'{feat}_sq'] = df_out[feat] ** 2
+            df_out[f'{feat}_cube'] = df_out[feat] ** 3
+    # Pairwise interactions among top features
+    for i, feat1 in enumerate(top_feats):
+        for feat2 in top_feats[i+1:]:
+            if feat1 in df_out.columns and feat2 in df_out.columns:
+                df_out[f'{feat1}_x_{feat2}'] = df_out[feat1] * df_out[feat2]
+    return df_out
+
+# --- Seasonality Smoothing and Outlier Flags ---
+def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_train=True):
+    df = df.copy()
+    # Smoothed mean demand by weekofyear/month
+    if is_train:
+        weekofyear_means = df.groupby('weekofyear')['num_orders'].mean()
+        month_means = df.groupby('month')['num_orders'].mean()
+    df['mean_orders_by_weekofyear'] = df['weekofyear'].map(weekofyear_means)
+    df['mean_orders_by_month'] = df['month'].map(month_means)
+    # Outlier flags
+    df['is_outlier_weekofyear'] = df['weekofyear'].isin([5, 48]).astype(int)
+    df['is_outlier_month'] = df['month'].isin([2]).astype(int)
+    return df, weekofyear_means, month_means
+
+def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_means=None):
+    df_out = df.copy()
+    df_out = create_temporal_features(df_out)
     if is_train or 'num_orders' in df_out.columns:
         df_out = create_lag_rolling_features(df_out)
     df_out = create_other_features(df_out)
     df_out = create_group_aggregates(df_out)
     df_out = create_interaction_features(df_out)
     df_out = create_advanced_interactions(df_out)
-
+    # Add smoothed seasonality and outlier flags
+    df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
-    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_std"])]
-    # lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_median", "_std"])]
+    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_cube", "_mean", "_std"])]
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns]
     df_out[cols_to_fill] = df_out[cols_to_fill].fillna(0)
-
-    # Fill discount_pct NaNs (e.g., from base_price=0)
     if "discount_pct" in df_out.columns:
         df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
-
-    return df_out
+    return df_out, weekofyear_means, month_means
 
 # --- One-hot encoding and feature engineering for train/test ---
 logging.info("Applying one-hot encoding and feature engineering...")
@@ -208,8 +194,9 @@ if cat_cols:
 train_df = df_full[df_full['week'].isin(df['week'].unique())].copy()
 test_df = df_full[df_full['week'].isin(test['week'].unique())].copy()
 
-train_df = apply_feature_engineering(train_df, is_train=True)
-test_df = apply_feature_engineering(test_df, is_train=False)
+# --- Add seasonality features with smoothed means and outlier flags ---
+train_df, weekofyear_means, month_means = apply_feature_engineering(train_df, is_train=True)
+test_df, _, _ = apply_feature_engineering(test_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means)
 
 # Drop rows in train_df where target is NA (if any, though unlikely from problem desc)
 train_df = train_df.dropna(subset=['num_orders']).reset_index(drop=True)
@@ -250,7 +237,7 @@ for col in OTHER_ROLLING_SUM_COLS:
 
 # Add interaction and advanced features
 for col in train_df.columns:
-    if (col.startswith("price_diff_x_") or col.startswith("rolling_mean_2_x_") or col.endswith("_sq") or col.endswith("_log1p") or "_x_" in col) and col not in features_set and col != TARGET and col != 'id':
+    if (col.startswith("price_diff_x_") or col.startswith("rolling_mean_2_x_") or col.endswith("_sq") or "_x_" in col) and col not in features_set and col != TARGET and col != 'id':
         FEATURES.append(col)
         features_set.add(col)
 
@@ -268,25 +255,41 @@ for prefix in ["category_", "cuisine_", "center_type_"]:
             FEATURES.append(col)
             features_set.add(col)
 
+# Add seasonality and outlier features
+seasonality_features = [
+    'weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos',
+    'mean_orders_by_weekofyear', 'mean_orders_by_month',
+    'is_outlier_weekofyear', 'is_outlier_month'
+]
+for f in seasonality_features:
+    if f in train_df.columns and f not in features_set:
+        FEATURES.append(f)
+        features_set.add(f)
+# Remove raw integer weekofyear/month if present
+for f in ['weekofyear', 'month']:
+    if f in FEATURES:
+        FEATURES.remove(f)
+        features_set.discard(f)
+
 logging.info(f"Using {len(FEATURES)} features: {FEATURES}")
 
 
 # --- Remove manually identified highly correlated features ---
-features_to_remove = [
-    'base_price',
-    'num_orders_rolling_mean_3',
-    'num_orders_rolling_mean_5',
-    'num_orders_rolling_mean_7',
-    'rolling_mean_2_x_home',
-    'meal_orders_std_log1p',
-    'checkout_price_sq',
-    'checkout_price_log1p',
-    'rolling_mean_2_x_emailer_log1p',
-    'center_orders_mean',
-    'meal_orders_mean',
-]
-FEATURES = [f for f in FEATURES if f not in features_to_remove]
-logging.info(f"Removed manually identified correlated features. {len(FEATURES)} features remain.")
+# features_to_remove = [
+#     'base_price',
+#     'num_orders_rolling_mean_3',
+#     'num_orders_rolling_mean_5',
+#     'num_orders_rolling_mean_7',
+#     'rolling_mean_2_x_home',
+#     'meal_orders_std_log1p',
+#     'checkout_price_sq',
+#     'checkout_price_log1p',
+#     'rolling_mean_2_x_emailer_log1p',
+#     'center_orders_mean',
+#     'meal_orders_mean',
+# ]
+# FEATURES = [f for f in FEATURES if f not in features_to_remove]
+# logging.info(f"Removed manually identified correlated features. {len(FEATURES)} features remain.")
 
 # --- Train/validation split ---
 max_week = train_df["week"].max()
