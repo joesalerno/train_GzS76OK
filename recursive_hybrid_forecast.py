@@ -483,9 +483,11 @@ class TqdmOptunaCallback:
         self.pbar.update(1)
     def close(self):
         self.pbar.close()
-        
+
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS)
-feature_hyperparam_study = optuna.create_study(direction="minimize")
+# Use Optuna's RDB storage to allow resuming
+optuna_storage = OPTUNA_DB
+feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
 feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback])
 optuna_callback.close()
 
