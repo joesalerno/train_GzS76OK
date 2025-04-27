@@ -21,7 +21,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 7, 14]
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 50 # Number of Optuna trials
+OPTUNA_TRIALS = 1 # Number of Optuna trials
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -103,16 +103,13 @@ def create_group_aggregates(df):
     df_out = df.copy()
     # Center-level aggregates
     df_out['center_orders_mean'] = df_out.groupby('center_id')['num_orders'].transform('mean')
-    # df_out['center_orders_median'] = df_out.groupby('center_id')['num_orders'].transform('median')
     df_out['center_orders_std'] = df_out.groupby('center_id')['num_orders'].transform('std')
     # Meal-level aggregates
     df_out['meal_orders_mean'] = df_out.groupby('meal_id')['num_orders'].transform('mean')
-    # df_out['meal_orders_median'] = df_out.groupby('meal_id')['num_orders'].transform('median')
     df_out['meal_orders_std'] = df_out.groupby('meal_id')['num_orders'].transform('std')
     # Category-level aggregates (if available)
     if 'category' in df_out.columns:
         df_out['category_orders_mean'] = df_out.groupby('category')['num_orders'].transform('mean')
-        # df_out['category_orders_median'] = df_out.groupby('category')['num_orders'].transform('median')
         df_out['category_orders_std'] = df_out.groupby('category')['num_orders'].transform('std')
     return df_out
 
@@ -159,9 +156,7 @@ def create_interaction_features(df):
     df_out = df.copy()
     interactions = {
         "price_diff_x_emailer": ("price_diff", "emailer_for_promotion"),
-        "lag1_x_emailer": ("num_orders_lag_1", "emailer_for_promotion"),
         "price_diff_x_home": ("price_diff", "homepage_featured"),
-        "lag1_x_home": ("num_orders_lag_1", "homepage_featured"),
         # New rolling mean 2 interactions
         "rolling_mean_2_x_emailer": ("num_orders_rolling_mean_2", "emailer_for_promotion"),
         "rolling_mean_2_x_home": ("num_orders_rolling_mean_2", "homepage_featured"),
@@ -187,7 +182,6 @@ def apply_feature_engineering(df, is_train=True):
 
     # Fill NaNs for all engineered features
     lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_std"])]
-    # lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_mean", "_median", "_std"])]
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns]
     df_out[cols_to_fill] = df_out[cols_to_fill].fillna(0)
 
@@ -220,55 +214,21 @@ TARGET = "num_orders"
 features_set = set()
 FEATURES = []
 
-# Add base features
-base_features = [
-    "checkout_price", "base_price", "homepage_featured", "emailer_for_promotion",
-    "discount", "discount_pct", "price_diff", "weekofyear"
-]
-for f in base_features:
-    if f in train_df.columns and f not in features_set:
+# Only keep features with mean_abs_shap >= 4 (strong signal) or in the top 20
+shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
+shap_df = pd.read_csv(shap_importance_path)
+shap_df = shap_df.sort_values('mean_abs_shap', ascending=False)
+strong_features = set(shap_df[shap_df['mean_abs_shap'] >= 4]['feature'])
+top20_features = set(shap_df.head(20)['feature'])
+selected_features = strong_features | top20_features
+
+# Add only selected features, in order of importance
+for f in shap_df['feature']:
+    if f in train_df.columns and f in selected_features and f not in features_set:
         FEATURES.append(f)
         features_set.add(f)
 
-# Add rolling means/stds
-for w in ROLLING_WINDOWS:
-    mean_col = f"{TARGET}_rolling_mean_{w}"
-    std_col = f"{TARGET}_rolling_std_{w}"
-    if mean_col in train_df.columns and mean_col not in features_set:
-        FEATURES.append(mean_col)
-        features_set.add(mean_col)
-    if std_col in train_df.columns and std_col not in features_set:
-        FEATURES.append(std_col)
-        features_set.add(std_col)
-
-# Add rolling sums
-for col in OTHER_ROLLING_SUM_COLS:
-    sum_col = f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}"
-    if sum_col in train_df.columns and sum_col not in features_set:
-        FEATURES.append(sum_col)
-        features_set.add(sum_col)
-
-# Add interaction and advanced features
-for col in train_df.columns:
-    if (col.startswith("price_diff_x_") or col.startswith("rolling_mean_2_x_") or col.endswith("_sq") or col.endswith("_log1p") or "_x_" in col) and col not in features_set and col != TARGET and col != 'id':
-        FEATURES.append(col)
-        features_set.add(col)
-
-# Add group-level aggregates
-for prefix in ["center_orders_", "meal_orders_", "category_orders_"]:
-    for col in train_df.columns:
-        if col.startswith(prefix) and col not in features_set and col != TARGET and col != 'id':
-            FEATURES.append(col)
-            features_set.add(col)
-
-# Add one-hot columns if present
-for prefix in ["category_", "cuisine_", "center_type_"]:
-    for col in train_df.columns:
-        if col.startswith(prefix) and col not in features_set and col != TARGET and col != 'id':
-            FEATURES.append(col)
-            features_set.add(col)
-
-logging.info(f"Using {len(FEATURES)} features: {FEATURES}")
+logging.info(f"Using {len(FEATURES)} pruned features: {FEATURES}")
 
 
 # --- Train/validation split ---
@@ -293,26 +253,25 @@ def lgb_rmsle(y_true, y_pred):
 def get_lgbm(params=None):
     """Initializes LGBMRegressor with default or provided params."""
     default_params = {
-        'objective': 'regression_l1', # MAE objective often works well for RMSLE
-        'metric': 'None', # Use custom metric
+        'objective': 'regression_l1',
+        'metric': 'None',
         'boosting_type': 'gbdt',
-        'n_estimators': 2000, # Increase estimators, use early stopping
+        'n_estimators': 2000,
         'learning_rate': 0.02,
-        'num_leaves': 31,
-        'max_depth': 5,
-        'feature_fraction': 0.8,
-        'bagging_fraction': 0.8,
-        'bagging_freq': 1,
-        'lambda_l1': 0.1,
-        'lambda_l2': 0.1,
-        'min_child_samples': 20,
+        'num_leaves': 24,  # More regularization
+        'max_depth': 4,    # More regularization
+        'feature_fraction': 0.7,  # More regularization
+        'bagging_fraction': 0.7,  # More regularization
+        'bagging_freq': 2,        # More regularization
+        'lambda_l1': 1.0,         # Stronger L1
+        'lambda_l2': 1.0,         # Stronger L2
+        'min_child_samples': 40,  # More regularization
         'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
     }
     if params:
         default_params.update(params)
-        # Ensure metric is None if custom metric is used during fit
         if 'eval_metric' in params and params['eval_metric'] == lgb_rmsle:
              default_params['metric'] = 'None'
     return LGBMRegressor(**default_params)
@@ -321,7 +280,6 @@ def get_lgbm(params=None):
 # --- Optuna Hyperparameter Tuning ---
 logging.info("Starting Optuna hyperparameter tuning...")
 
-# Use Optuna's SQLite storage for persistence (no joblib)
 try:
     study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
     logging.info(f"Loaded existing Optuna study from {OPTUNA_DB}")
@@ -368,7 +326,6 @@ def objective(trial):
 # Run Optuna optimization
 study.optimize(objective, n_trials=OPTUNA_TRIALS, timeout=1800) # Add a timeout (e.g., 30 minutes)
 
-# No need to save with joblib, study is persisted in SQLite
 logging.info(f"Optuna study saved to {OPTUNA_DB}")
 
 best_params = study.best_params
@@ -376,7 +333,7 @@ logging.info(f"Best Optuna params: {best_params}")
 logging.info(f"Best validation RMSLE: {study.best_value:.5f}")
 
 # --- Final Model Training ---
-logging.info("Training final model on full training data with best params and early stopping...")
+logging.info("Training final model on full training data with best params...")
 # Merge best params with fixed params for the final model
 final_params = {
     'objective': 'regression_l1',
@@ -487,39 +444,39 @@ try:
 except Exception as e:
     logging.error(f"Error during SHAP analysis: {e}")
 
-# def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001):
-#     """
-#     Prune features by SHAP importance and correlation:
-#     - Keep only features with SHAP importance above threshold or in top N.
-#     - For highly correlated pairs, keep only the one with higher SHAP importance.
-#     """
-#     import pandas as pd
-#     # Load SHAP importances
-#     shap_df = pd.read_csv(shap_importance_path)
-#     shap_df = shap_df.set_index('feature')
-#     # 1. Keep only top N or above min importance
-#     shap_df = shap_df.sort_values('mean_abs_shap', ascending=False)
-#     keep_features = set(shap_df.head(shap_top_n).index)
-#     keep_features |= set(shap_df[shap_df['mean_abs_shap'] >= shap_min_importance].index)
-#     keep_features = [f for f in FEATURES if f in keep_features]
-#     # 2. Remove highly correlated features (keep higher SHAP)
-#     corr = train_df[keep_features].corr().abs()
-#     to_remove = set()
-#     for i, f1 in enumerate(keep_features):
-#         for f2 in keep_features[i+1:]:
-#             if corr.loc[f1, f2] > corr_threshold:
-#                 # Remove the one with lower SHAP
-#                 if shap_df.loc[f1, 'mean_abs_shap'] >= shap_df.loc[f2, 'mean_abs_shap']:
-#                     to_remove.add(f2)
-#                 else:
-#                     to_remove.add(f1)
-#     pruned_features = [f for f in keep_features if f not in to_remove]
-#     logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using SHAP and correlation.")
-#     return pruned_features
-# # --- Prune features before training ---
-# shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
-# FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001)
-# logging.info(f"Final pruned feature set: {FEATURES}")
+def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001):
+    """
+    Prune features by SHAP importance and correlation:
+    - Keep only features with SHAP importance above threshold or in top N.
+    - For highly correlated pairs, keep only the one with higher SHAP importance.
+    """
+    import pandas as pd
+    # Load SHAP importances
+    shap_df = pd.read_csv(shap_importance_path)
+    shap_df = shap_df.set_index('feature')
+    # 1. Keep only top N or above min importance
+    shap_df = shap_df.sort_values('mean_abs_shap', ascending=False)
+    keep_features = set(shap_df.head(shap_top_n).index)
+    keep_features |= set(shap_df[shap_df['mean_abs_shap'] >= shap_min_importance].index)
+    keep_features = [f for f in FEATURES if f in keep_features]
+    # 2. Remove highly correlated features (keep higher SHAP)
+    corr = train_df[keep_features].corr().abs()
+    to_remove = set()
+    for i, f1 in enumerate(keep_features):
+        for f2 in keep_features[i+1:]:
+            if corr.loc[f1, f2] > corr_threshold:
+                # Remove the one with lower SHAP
+                if shap_df.loc[f1, 'mean_abs_shap'] >= shap_df.loc[f2, 'mean_abs_shap']:
+                    to_remove.add(f2)
+                else:
+                    to_remove.add(f1)
+    pruned_features = [f for f in keep_features if f not in to_remove]
+    logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using SHAP and correlation.")
+    return pruned_features
+# --- Prune features before training ---
+shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
+FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95, shap_top_n=30, shap_min_importance=0.001)
+logging.info(f"Final pruned feature set: {FEATURES}")
 
 # --- Plotting Example: Actual vs Predicted for Validation Set ---
 logging.info("Generating validation plot...")
