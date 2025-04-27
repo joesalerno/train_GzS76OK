@@ -22,7 +22,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 1000 # Number of Optuna trials
+OPTUNA_TRIALS = 1 # Number of Optuna trials
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -138,16 +138,34 @@ def create_advanced_interactions(df):
         'meal_orders_mean', 'center_orders_mean', 'checkout_price', 'price_diff', 'discount_pct',
         'weekofyear', 'emailer_for_promotion', 'homepage_featured'
     ]
+    time_feats = {'weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos'}
     # Polynomial features (squared, cubic)
     for feat in top_feats:
         if feat in df_out.columns:
             df_out[f'{feat}_sq'] = df_out[feat] ** 2
             df_out[f'{feat}_cube'] = df_out[feat] ** 3
-    # Pairwise interactions among top features
+    # Pairwise interactions among top features (at most one time feature)
     for i, feat1 in enumerate(top_feats):
         for feat2 in top_feats[i+1:]:
             if feat1 in df_out.columns and feat2 in df_out.columns:
-                df_out[f'{feat1}_x_{feat2}'] = df_out[feat1] * df_out[feat2]
+                if sum(f in time_feats for f in [feat1, feat2]) <= 1:
+                    df_out[f'{feat1}_x_{feat2}'] = df_out[feat1] * df_out[feat2]
+    # Selected third-order interactions among most important features (at most one time feature)
+    important_feats = [
+        'num_orders_rolling_mean_2', 'num_orders_rolling_mean_5', 'mean_orders_by_weekofyear',
+        'weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos',
+        'discount_pct', 'price_diff', 'emailer_for_promotion', 'homepage_featured'
+    ]
+    third_order_dict = {}
+    for i, f1 in enumerate(important_feats):
+        for j, f2 in enumerate(important_feats):
+            for k, f3 in enumerate(important_feats):
+                if i < j < k and all(f in df_out.columns for f in [f1, f2, f3]):
+                    if sum(f in time_feats for f in [f1, f2, f3]) <= 1:
+                        colname = f'{f1}_x_{f2}_x_{f3}'
+                        third_order_dict[colname] = df_out[f1] * df_out[f2] * df_out[f3]
+    if third_order_dict:
+        df_out = pd.concat([df_out, pd.DataFrame(third_order_dict, index=df_out.index)], axis=1)
     return df_out
 
 # --- Seasonality Smoothing and Outlier Flags ---
@@ -176,11 +194,18 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     # Add smoothed seasonality and outlier flags
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
-    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in ["lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_cube", "_mean", "_std"])]
-    cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns]
-    df_out[cols_to_fill] = df_out[cols_to_fill].fillna(0)
+    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
+        "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home",
+        "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_sq", "_cube", "_mean", "_std"
+    ])]
+    # Only fill columns that exist in the DataFrame and have the correct length
+    cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
+    if cols_to_fill:
+        df_out.loc[:, cols_to_fill] = df_out[cols_to_fill].fillna(0)
     if "discount_pct" in df_out.columns:
         df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
+    # Defragment DataFrame to avoid future fragmentation issues
+    df_out = df_out.copy()
     return df_out, weekofyear_means, month_means
 
 # --- One-hot encoding and feature engineering for train/test ---
@@ -429,7 +454,9 @@ for week_num in test_weeks:
     current_week_mask = history_df['week'] == week_num
 
     # Re-apply feature engineering for the current state
-    history_df = apply_feature_engineering(history_df, is_train=False)
+    history_df, _, _ = apply_feature_engineering(
+        history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
+    )
 
     current_features = history_df.loc[current_week_mask, FEATURES]
 
@@ -507,37 +534,38 @@ try:
 except Exception as e:
     logging.error(f"Error during SHAP analysis: {e}")
 
-# def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95):
-#     """
-#     Prune features by correlation only:
-#     - For highly correlated pairs, keep only the one with higher SHAP importance.
-#     - Do NOT prune based on SHAP top N or minimum importance.
-#     """
-#     import pandas as pd
-#     # Load SHAP importances
-#     shap_df = pd.read_csv(shap_importance_path)
-#     shap_df = shap_df.set_index('feature')
-#     # Only consider features present in both FEATURES and SHAP importances
-#     keep_features = [f for f in FEATURES if f in shap_df.index]
-#     # Remove highly correlated features (keep higher SHAP)
-#     corr = train_df[keep_features].corr().abs()
-#     to_remove = set()
-#     for i, f1 in enumerate(keep_features):
-#         for f2 in keep_features[i+1:]:
-#             if corr.loc[f1, f2] > corr_threshold:
-#                 # Remove the one with lower SHAP
-#                 if shap_df.loc[f1, 'mean_abs_shap'] >= shap_df.loc[f2, 'mean_abs_shap']:
-#                     to_remove.add(f2)
-#                 else:
-#                     to_remove.add(f1)
-#     pruned_features = [f for f in keep_features if f not in to_remove]
-#     logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using only correlation.")
-#     return pruned_features
+def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95):
+    """
+    Prune features by correlation only:
+    - For highly correlated pairs, keep only the one with higher SHAP importance.
+    - Do NOT prune based on SHAP top N or minimum importance.
+    """
+    import pandas as pd
+    # Load SHAP importances
+    shap_df = pd.read_csv(shap_importance_path)
+    shap_df = shap_df.set_index('feature')
+    # Only consider features present in both FEATURES and SHAP importances
+    keep_features = [f for f in FEATURES if f in shap_df.index]
+    # Remove highly correlated features (keep higher SHAP)
+    corr = train_df[keep_features].corr().abs()
+    to_remove = set()
+    for i, f1 in enumerate(keep_features):
+        for f2 in keep_features[i+1:]:
+            if corr.loc[f1, f2] > corr_threshold:
+                # Remove the one with lower SHAP
+                if shap_df.loc[f1, 'mean_abs_shap'] >= shap_df.loc[f2, 'mean_abs_shap']:
+                    to_remove.add(f2)
+                else:
+                    to_remove.add(f1)
+    pruned_features = [f for f in keep_features if f not in to_remove]
+    logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using only correlation.")
+    return pruned_features
 
-# # --- Prune features before final model training ---
-# shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
-# FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95)
-# logging.info(f"Final pruned feature set (correlation only): {FEATURES}")
+# --- Prune features before final model training ---
+shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
+FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95)
+logging.info(f"Final pruned feature set (correlation only): {FEATURES}")
+logging.info(f"Pruned features: {[f for f in FEATURES if f not in train_df.columns]}")
 
 # --- Plotting Example: Actual vs Predicted for Validation Set ---
 logging.info("Generating validation plot...")
