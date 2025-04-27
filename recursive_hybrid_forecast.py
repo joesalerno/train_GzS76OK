@@ -553,7 +553,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
             LGBMRegressor(**params).fit(
                 train_split_df.iloc[train_idx][selected_features],
                 train_split_df.iloc[train_idx][TARGET],
-                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_split_df][TARGET]),
+                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
                           (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
                 eval_metric=lgb_rmsle,
                 callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
