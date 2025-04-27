@@ -5,6 +5,7 @@ import os
 OUTPUT_DIRECTORY = "output"
 os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
 
+import re
 import pandas as pd
 import numpy as np
 from lightgbm import LGBMRegressor
@@ -526,7 +527,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     # Find all features with sin/cos in their name (excluding those already in a pair)
     sincos_features = [f for f in FEATURES if re.search(r'(_sin|_cos)', f)]
     # Group into pairs by prefix (e.g. 'num_orders_rolling_mean_2_x_weekofyear')
-    import re
     pair_prefixes = set()
     pair_map = {}
     for f in sincos_features:
