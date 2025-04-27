@@ -939,6 +939,7 @@ def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, co
                     to_remove.add(f1)
     pruned_features = [f for f in keep_features if f not in to_remove]
     logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using only correlation.")
+    logging.info(f"Removed features: {to_remove}")
     return FEATURES # Uncomment the following line to run the pruning function
     # return pruned_features
 
@@ -946,7 +947,6 @@ def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, co
 shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
 FEATURES = prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, corr_threshold=0.95)
 logging.info(f"Final pruned feature set (correlation only): {FEATURES}")
-logging.info(f"Pruned features: {[f for f in FEATURES if f not in train_df.columns]}")
 
 # --- Plotting Example: Actual vs Predicted for Validation Set ---
 logging.info("Generating validation plot...")
@@ -973,16 +973,17 @@ except Exception as e:
 logging.info("Script finished.")
 
 # --- Recursive Stacking/Ensembling ---
-def recursive_predict(model, train_df, test_df, FEATURES):
+def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means):
     """Run recursive prediction for a single model."""
     history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
     test_weeks = sorted(test_df['week'].unique())
     for week_num in test_weeks:
         current_week_mask = history_df['week'] == week_num
-        history_df, _, _ = apply_feature_engineering(history_df, is_train=False)
+        history_df, _, _ = apply_feature_engineering(history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means)
         current_features = history_df.loc[current_week_mask, FEATURES]
         missing_cols = [col for col in FEATURES if col not in current_features.columns]
         if missing_cols:
+            logging.warning(f"Missing columns during prediction for week {week_num}: {missing_cols}. Filling with 0.")
             for col in missing_cols:
                 current_features[col] = 0
         current_features = current_features[FEATURES]
@@ -995,24 +996,22 @@ def recursive_predict(model, train_df, test_df, FEATURES):
     return final_predictions.set_index('id')['num_orders']
 
 
-def recursive_ensemble(train_df, test_df, FEATURES, n_models=5):
+def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=5):
     """Train n_models with different seeds, run recursive prediction, and average results."""
     preds_list = []
     for i in range(n_models):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
-        params = final_params.copy()
-        params['seed'] = SEED + i
-        model = LGBMRegressor(**params)
-        model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
-        preds = recursive_predict(model, train_df, test_df, FEATURES)
-        preds_list.append(preds)
+        model = LGBMRegressor(**final_params, seed=SEED+i)
+        model.fit(train_df[FEATURES], train_df[TARGET])
+        preds = recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means)
+        preds_list.append(preds.values)
     # Average predictions
     ensemble_preds = np.mean(preds_list, axis=0).round().astype(int)
     return ensemble_preds
 
 # --- Recursive Ensemble Prediction ---
 logging.info("Running recursive ensemble prediction...")
-ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, n_models=5)
+ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=5)
 final_predictions_df['num_orders_ensemble'] = ensemble_preds
 submission_path_ensemble = f"{SUBMISSION_FILE_PREFIX}_optuna_ensemble.csv"
 final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble, index=False)
@@ -1215,7 +1214,7 @@ def recursive_ensemble(train_df, test_df, FEATURES, n_models=5):
         model = LGBMRegressor(**params)
         model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
         preds = recursive_predict(model, train_df, test_df, FEATURES)
-        preds_list.append(preds)
+        preds_list.append(preds.values)
     # Average predictions
     ensemble_preds = np.mean(preds_list, axis=0).round().astype(int)
     return ensemble_preds
