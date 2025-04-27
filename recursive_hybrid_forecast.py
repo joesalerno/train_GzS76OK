@@ -256,12 +256,12 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     ])]
     # Only fill columns that exist in the DataFrame and have the correct length
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
+    # Remove duplicate columns to avoid reindex error before NaN filling
+    df_out = df_out.loc[:, ~df_out.columns.duplicated()]
     if cols_to_fill:
         df_out.loc[:, cols_to_fill] = df_out[cols_to_fill].fillna(0)
     if "discount_pct" in df_out.columns:
         df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
-    # Remove duplicate columns to avoid reindex error
-    df_out = df_out.loc[:, ~df_out.columns.duplicated()]
     # Defragment DataFrame to avoid future fragmentation issues
     df_out = df_out.copy()
     return df_out, weekofyear_means, month_means
@@ -979,7 +979,7 @@ def recursive_predict(model, train_df, test_df, FEATURES):
     test_weeks = sorted(test_df['week'].unique())
     for week_num in test_weeks:
         current_week_mask = history_df['week'] == week_num
-        history_df = apply_feature_engineering(history_df, is_train=False)
+        history_df, _, _ = apply_feature_engineering(history_df, is_train=False)
         current_features = history_df.loc[current_week_mask, FEATURES]
         missing_cols = [col for col in FEATURES if col not in current_features.columns]
         if missing_cols:
