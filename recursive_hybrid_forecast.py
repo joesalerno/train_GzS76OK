@@ -9,6 +9,7 @@ import lightgbm as lgb  # Added for early stopping callback
 from sklearn.model_selection import KFold
 from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
+import concurrent.futures  # For parallel ensemble training
 
 # --- Configuration ---
 DATA_PATH = "train.csv"
@@ -23,7 +24,8 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 2 # Number of Optuna trials
+OPTUNA_TRIALS = 20 # Number of Optuna trials (increased for better search)
+OPTUNA_NJOBS = 4  # Number of parallel Optuna jobs (adjust as needed)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -504,7 +506,8 @@ optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS)
 # Use Optuna's RDB storage to allow resuming
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
-feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback])
+# Enable parallelization with n_jobs
+feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=OPTUNA_NJOBS)
 optuna_callback.close()
 
 # Extract best features and params
@@ -629,13 +632,18 @@ def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None,
 
 
 def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=5, eval_metric=None):
-    preds_list = []
-    for i in range(n_models):
+    """Parallelized ensemble training and prediction."""
+    def train_and_predict(i):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
         params = final_params.copy(); params.pop('seed', None)
         model = LGBMRegressor(**params, seed=SEED+i)
-        model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=eval_metric) if eval_metric else model.fit(train_df[FEATURES], train_df[TARGET])
-        preds_list.append(recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values)
+        if eval_metric:
+            model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=eval_metric)
+        else:
+            model.fit(train_df[FEATURES], train_df[TARGET])
+        return recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_models) as executor:
+        preds_list = list(executor.map(train_and_predict, range(n_models)))
     return np.mean(preds_list, axis=0).round().astype(int)
 
 # --- Recursive Ensemble Prediction with Selected Features ---
