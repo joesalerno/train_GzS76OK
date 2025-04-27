@@ -142,10 +142,12 @@ def create_advanced_interactions(df):
     promo_feats = ['emailer_for_promotion', 'homepage_featured']
     time_feats = ['weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos', 'mean_orders_by_weekofyear', 'mean_orders_by_month']
 
-    # Polynomial features (squared, cubic)
+    # Polynomial features (squared, cubic) -- skip *_sin and *_cos
     top_feats = demand_feats + price_feats + promo_feats + time_feats
     for feat in top_feats:
         if feat in df_out.columns:
+            if feat.endswith('_sin') or feat.endswith('_cos'):
+                continue  # Do not create *_sin_sq or *_cos_sq
             df_out[f'{feat}_sq'] = df_out[feat] ** 2
             df_out[f'{feat}_cube'] = df_out[feat] ** 3
 
