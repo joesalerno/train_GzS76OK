@@ -415,101 +415,9 @@ def lgb_rmsle(y_true, y_pred):
     """RMSLE metric for LightGBM"""
     return 'rmsle', rmsle(y_true, y_pred), False # lower is better
 
-# --- Model Training Function ---
-def get_lgbm(params=None):
-    """Initializes LGBMRegressor with default or provided params."""
-    default_params = {
-        'objective': 'regression_l1', # MAE objective often works well for RMSLE
-        'metric': 'None', # Use custom metric
-        'boosting_type': 'gbdt',
-        'n_estimators': 2000, # Increase estimators, use early stopping
-        'learning_rate': 0.02,
-        'num_leaves': 31,
-        'max_depth': 5,
-        'feature_fraction': 0.8,
-        'bagging_fraction': 0.8,
-        'bagging_freq': 1,
-        'lambda_l1': 0.1,
-        'lambda_l2': 0.1,
-        'min_child_samples': 20,
-        'seed': SEED,
-        'n_jobs': -1,
-        'verbose': -1,
-    }
-    if params:
-        default_params.update(params)
-        # Ensure metric is None if custom metric is used during fit
-        if 'eval_metric' in params and params['eval_metric'] == lgb_rmsle:
-             default_params['metric'] = 'None'
-    return LGBMRegressor(**default_params)
-
-# --- Optuna Hyperparameter Tuning ---
-logging.info("Starting Optuna hyperparameter tuning...")
-
-# Use Optuna's SQLite storage for persistence (no joblib)
-try:
-    study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
-    logging.info(f"Loaded existing Optuna study from {OPTUNA_DB}")
-except Exception:
-    study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
-    logging.info(f"Created new Optuna study at {OPTUNA_DB}")
-
-def objective(trial):
-    """Optuna objective function."""
-    params = {
-        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
-        'num_leaves': trial.suggest_int('num_leaves', 10, 64),
-        'max_depth': trial.suggest_int('max_depth', 3, 8),
-        'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
-        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
-        'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
-        'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
-        'lambda_l1': trial.suggest_float('lambda_l1', 1e-3, 10.0, log=True),
-        'lambda_l2': trial.suggest_float('lambda_l2', 1e-3, 10.0, log=True),
-    }
-    # Add fixed params
-    params.update({
-        'objective': 'regression_l1',
-        'boosting_type': 'gbdt',
-        'n_estimators': 2000,
-        'seed': SEED,
-        'n_jobs': -1,
-        'verbose': -1,
-        'metric':'None', # Crucial when using feval
-    })
-
-    model = LGBMRegressor(**params)
-    model.fit(
-        train_split_df[FEATURES], train_split_df[TARGET],
-        eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
-        eval_metric=lgb_rmsle, # Use custom RMSLE metric
-        callbacks=[optuna.integration.LightGBMPruningCallback(trial, 'rmsle'), # Pruning based on validation RMSLE
-                   lgb.early_stopping(100, verbose=False)] # Early stopping
-    )
-    preds = model.predict(valid_df[FEATURES])
-    score = rmsle(valid_df[TARGET], preds)
-    return score
-
-# Run Optuna optimization
-study.optimize(objective, n_trials=1, timeout=1800) # Add a timeout (e.g., 30 minutes)
-# study.optimize(objective, n_trials=OPTUNA_TRIALS, timeout=1800) # Add a timeout (e.g., 30 minutes)
-
-# No need to save with joblib, study is persisted in SQLite
-logging.info(f"Optuna study saved to {OPTUNA_DB}")
-
-best_params = study.best_params
-logging.info(f"Best Optuna params: {best_params}")
-logging.info(f"Best validation RMSLE: {study.best_value:.5f}")
-
-
-
-
-
-
-
 # --- Final Model Training ---
 logging.info("Training final model on full training data with best params...")
-# Merge best params with fixed params for the final model
+# Use best_params from Optuna feature+hyperparam selection, merged with fixed params
 final_params = {
     'objective': 'regression_l1',
     'boosting_type': 'gbdt',
@@ -519,53 +427,8 @@ final_params = {
     'verbose': -1,
     'metric': 'None'
 }
-final_params.update(best_params) # Best params from Optuna override defaults
-
-
-# --- Recursive Prediction and Ensemble Utilities ---
-def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None, month_means=None):
-    """Run recursive prediction for a single model."""
-    history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
-    test_weeks = sorted(test_df['week'].unique())
-    for week_num in test_weeks:
-        current_week_mask = history_df['week'] == week_num
-        # Only pass means if provided (for test set prediction)
-        if weekofyear_means is not None and month_means is not None:
-            history_df, _, _ = apply_feature_engineering(history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means)
-        else:
-            history_df, _, _ = apply_feature_engineering(history_df, is_train=False)
-        current_features = history_df.loc[current_week_mask, FEATURES]
-        missing_cols = [col for col in FEATURES if col not in current_features.columns]
-        if missing_cols:
-            for col in missing_cols:
-                current_features[col] = 0
-        current_features = current_features[FEATURES]
-        current_preds = model.predict(current_features)
-        current_preds = np.clip(current_preds, 0, None).round().astype(float)
-        history_df.loc[current_week_mask, 'num_orders'] = current_preds
-    final_predictions = history_df.loc[history_df['id'].isin(test_df['id']), ['id', 'num_orders']].copy()
-    final_predictions['num_orders'] = final_predictions['num_orders'].round().astype(int)
-    final_predictions['id'] = final_predictions['id'].astype(int)
-    return final_predictions.set_index('id')['num_orders']
-
-
-def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=5, eval_metric=None):
-    """Train n_models with different seeds, run recursive prediction, and average results."""
-    preds_list = []
-    for i in range(n_models):
-        logging.info(f"Training ensemble model {i+1}/{n_models}...")
-        params = final_params.copy()
-        params.pop('seed', None)
-        model = LGBMRegressor(**params, seed=SEED+i)
-        if eval_metric is not None:
-            model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=eval_metric)
-        else:
-            model.fit(train_df[FEATURES], train_df[TARGET])
-        preds = recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means)
-        preds_list.append(preds.values)
-    # Average predictions
-    ensemble_preds = np.mean(preds_list, axis=0).round().astype(int)
-    return ensemble_preds
+# best_params is set after Optuna feature+hyperparam selection below
+# final_params will be updated after best_params is defined
 
 # --- Optuna Feature Selection and Hyperparameter Tuning in a Single CV Loop ---
 import optuna
@@ -591,46 +454,49 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'verbose': -1,
         'metric': 'None',
     }
-    # Cyclical feature pairs
-    cyclical_pairs = [
-        ('weekofyear_sin', 'weekofyear_cos'),
-        ('month_sin', 'month_cos'),
-    ]
-    selected_features = []
-    # Handle cyclical pairs as a group
-    for sin_feat, cos_feat in cyclical_pairs:
-        use_pair = trial.suggest_categorical(f"{sin_feat}_{cos_feat}_pair", [True, False])
-        if use_pair:
-            selected_features.extend([sin_feat, cos_feat])
-    # Handle all other features (not in any cyclical pair)
-    cyclical_flat = set([f for pair in cyclical_pairs for f in pair])
-    for f in FEATURES:
-        if f in cyclical_flat:
-            continue  # Already handled
-        if trial.suggest_categorical(f, [True, False]):
-            selected_features.append(f)
+    cyclical_pairs = [('weekofyear_sin', 'weekofyear_cos'), ('month_sin', 'month_cos')]
+    cyclical_flat = {f for pair in cyclical_pairs for f in pair}
+    selected_features = [f for sin, cos in cyclical_pairs if trial.suggest_categorical(f"{sin}_{cos}_pair", [True, False]) for f in (sin, cos)]
+    selected_features += [f for f in FEATURES if f not in cyclical_flat and trial.suggest_categorical(f, [True, False])]
     if len(selected_features) < 10:
         return float('inf')
     kf = KFold(n_splits=3, shuffle=True, random_state=SEED)
-    scores = []
-    for train_idx, valid_idx in kf.split(train_split_df):
-        model = LGBMRegressor(**params)
-        model.fit(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET])
-        preds = model.predict(train_split_df.iloc[valid_idx][selected_features])
-        scores.append(rmsle(train_split_df.iloc[valid_idx][TARGET], preds))
-    return np.mean(scores)
+    return np.mean([
+        rmsle(
+            train_split_df.iloc[valid_idx][TARGET],
+            LGBMRegressor(**params).fit(
+                train_split_df.iloc[train_idx][selected_features],
+                train_split_df.iloc[train_idx][TARGET]
+            ).predict(train_split_df.iloc[valid_idx][selected_features])
+        )
+        for train_idx, valid_idx in kf.split(train_split_df)
+    ])
 
 # --- Optuna Feature Selection + Hyperparameter Tuning ---
 logging.info("Starting Optuna feature+hyperparam selection (CV)...")
+
+# Wrap the study.optimize with a tqdm progress bar
+class TqdmOptunaCallback:
+    def __init__(self, n_trials):
+        self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0)
+    def __call__(self, study, trial):
+        self.pbar.update(1)
+    def close(self):
+        self.pbar.close()
+        
+optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS)
 feature_hyperparam_study = optuna.create_study(direction="minimize")
-feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200)
+feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback])
+optuna_callback.close()
 
 # Extract best features and params
 best_mask = [feature_hyperparam_study.best_trial.params.get(f, False) for f in FEATURES]
 SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
-best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES}
+best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
+selected_pairs = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k.endswith('_pair')}
 logging.info(f"Optuna-selected features ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
 logging.info(f"Optuna-selected params: {best_params}")
+logging.info(f"Optuna-selected cyclical pairs: {selected_pairs}")
 
 # Use SELECTED_FEATURES and best_params for final model and ensemble
 FEATURES = SELECTED_FEATURES
@@ -724,6 +590,35 @@ try:
     logging.info("Validation plot saved.")
 except Exception as e:
     logging.error(f"Error during plotting: {e}")
+
+# --- Recursive Prediction and Ensemble Utilities ---
+def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None, month_means=None):
+    history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
+    for week_num in sorted(test_df['week'].unique()):
+        current_week_mask = history_df['week'] == week_num
+        history_df, _, _ = apply_feature_engineering(
+            history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
+        ) if weekofyear_means is not None and month_means is not None else apply_feature_engineering(history_df, is_train=False)
+        current_features = history_df.loc[current_week_mask, FEATURES]
+        for col in [col for col in FEATURES if col not in current_features.columns]:
+            current_features[col] = 0
+        current_preds = np.clip(model.predict(current_features[FEATURES]), 0, None).round().astype(float)
+        history_df.loc[current_week_mask, 'num_orders'] = current_preds
+    final_predictions = history_df.loc[history_df['id'].isin(test_df['id']), ['id', 'num_orders']].copy()
+    final_predictions['num_orders'] = final_predictions['num_orders'].round().astype(int)
+    final_predictions['id'] = final_predictions['id'].astype(int)
+    return final_predictions.set_index('id')['num_orders']
+
+
+def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=5, eval_metric=None):
+    preds_list = []
+    for i in range(n_models):
+        logging.info(f"Training ensemble model {i+1}/{n_models}...")
+        params = final_params.copy(); params.pop('seed', None)
+        model = LGBMRegressor(**params, seed=SEED+i)
+        model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=eval_metric) if eval_metric else model.fit(train_df[FEATURES], train_df[TARGET])
+        preds_list.append(recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values)
+    return np.mean(preds_list, axis=0).round().astype(int)
 
 # --- Recursive Ensemble Prediction with Selected Features ---
 logging.info("Running recursive ensemble prediction with selected features...")
