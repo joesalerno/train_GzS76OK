@@ -24,8 +24,8 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 20 # Number of Optuna trials (increased for better search)
-OPTUNA_NJOBS = 4  # Number of parallel Optuna jobs (adjust as needed)
+OPTUNA_TRIALS = 16 # Number of Optuna trials (increased for better search)
+OPTUNA_NJOBS = 1  # Use sequential Optuna trials for best resource usage with LGBM
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -564,7 +564,7 @@ optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS)
 # Use Optuna's RDB storage to allow resuming
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
-# Enable parallelization with n_jobs
+# Run Optuna sequentially for best performance with LGBM
 feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=OPTUNA_NJOBS)
 optuna_callback.close()
 
