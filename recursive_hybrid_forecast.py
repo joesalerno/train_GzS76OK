@@ -155,11 +155,15 @@ def create_advanced_interactions(df):
         if feat in promo_feats: return 'promo'
         if feat in time_feats: return 'time'
         return None
+    pairwise_dict = {}
     for i, feat1 in enumerate(top_feats):
         for feat2 in top_feats[i+1:]:
             if feat1 in df_out.columns and feat2 in df_out.columns:
                 if group_of(feat1) != group_of(feat2):
-                    df_out[f'{feat1}_x_{feat2}'] = df_out[feat1] * df_out[feat2]
+                    colname = f'{feat1}_x_{feat2}'
+                    pairwise_dict[colname] = df_out[feat1] * df_out[feat2]
+    if pairwise_dict:
+        df_out = pd.concat([df_out, pd.DataFrame(pairwise_dict, index=df_out.index)], axis=1)
 
     # Third-order interactions: one from each of three different groups (never more than one time feature)
     third_order_dict = {}
