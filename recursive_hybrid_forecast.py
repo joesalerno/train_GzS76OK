@@ -260,6 +260,8 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
         df_out.loc[:, cols_to_fill] = df_out[cols_to_fill].fillna(0)
     if "discount_pct" in df_out.columns:
         df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
+    # Remove duplicate columns to avoid reindex error
+    df_out = df_out.loc[:, ~df_out.columns.duplicated()]
     # Defragment DataFrame to avoid future fragmentation issues
     df_out = df_out.copy()
     return df_out, weekofyear_means, month_means
@@ -694,7 +696,8 @@ def objective(trial):
     return score
 
 # Run Optuna optimization
-study.optimize(objective, n_trials=OPTUNA_TRIALS, timeout=1800) # Add a timeout (e.g., 30 minutes)
+study.optimize(objective, n_trials=1, timeout=1800) # Add a timeout (e.g., 30 minutes)
+# study.optimize(objective, n_trials=OPTUNA_TRIALS, timeout=1800) # Add a timeout (e.g., 30 minutes)
 
 # No need to save with joblib, study is persisted in SQLite
 logging.info(f"Optuna study saved to {OPTUNA_DB}")
@@ -1016,31 +1019,214 @@ final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_
 logging.info(f"Ensemble submission file saved to {submission_path_ensemble}")
 
 # --- Optuna Feature Selection ---
+# import optuna
+# from sklearn.model_selection import KFold
+
+# def optuna_feature_selection_objective(trial):
+#     # Use a binary mask for each feature
+#     selected_features = [f for f in FEATURES if trial.suggest_categorical(f, [True, False])]
+#     if len(selected_features) < 10:  # Avoid too few features
+#         return float('inf')
+#     kf = KFold(n_splits=3, shuffle=True, random_state=SEED)
+#     scores = []
+#     for train_idx, valid_idx in kf.split(train_split_df):
+#         model = get_lgbm(final_params).set_params(n_estimators=300)
+#         model.fit(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET])
+#         preds = model.predict(train_split_df.iloc[valid_idx][selected_features])
+#         scores.append(rmsle(train_split_df.iloc[valid_idx][TARGET], preds))
+#     return np.mean(scores)
+
+# # --- Optuna Feature Selection ---
+# logging.info("Starting Optuna feature selection...")
+# feature_selection_study = optuna.create_study(direction="minimize")
+# feature_selection_study.optimize(optuna_feature_selection_objective, n_trials=40, timeout=3600)
+
+# best_mask = [feature_selection_study.best_trial.params.get(f, False) for f in FEATURES]
+# SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
+# logging.info(f"Optuna-selected features ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
+
+# # Use SELECTED_FEATURES for final model and ensemble
+# FEATURES = SELECTED_FEATURES
+
+# --- Optuna Feature Selection and Hyperparameter Tuning in a Single CV Loop ---
 import optuna
 from sklearn.model_selection import KFold
 
-def optuna_feature_selection_objective(trial):
-    # Use a binary mask for each feature
+def optuna_feature_selection_and_hyperparam_objective(trial):
+    # Hyperparameter search space
+    params = {
+        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
+        'num_leaves': trial.suggest_int('num_leaves', 10, 64),
+        'max_depth': trial.suggest_int('max_depth', 3, 8),
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
+        'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
+        'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-3, 10.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-3, 10.0, log=True),
+        'objective': 'regression_l1',
+        'boosting_type': 'gbdt',
+        'n_estimators': 500,
+        'seed': SEED,
+        'n_jobs': -1,
+        'verbose': -1,
+        'metric': 'None',
+    }
+    # Feature selection mask
     selected_features = [f for f in FEATURES if trial.suggest_categorical(f, [True, False])]
-    if len(selected_features) < 10:  # Avoid too few features
+    if len(selected_features) < 10:
         return float('inf')
     kf = KFold(n_splits=3, shuffle=True, random_state=SEED)
     scores = []
     for train_idx, valid_idx in kf.split(train_split_df):
-        model = get_lgbm(final_params).set_params(n_estimators=300)
+        model = LGBMRegressor(**params)
         model.fit(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET])
         preds = model.predict(train_split_df.iloc[valid_idx][selected_features])
         scores.append(rmsle(train_split_df.iloc[valid_idx][TARGET], preds))
     return np.mean(scores)
 
-# --- Optuna Feature Selection ---
-logging.info("Starting Optuna feature selection...")
-feature_selection_study = optuna.create_study(direction="minimize")
-feature_selection_study.optimize(optuna_feature_selection_objective, n_trials=40, timeout=3600)
+# --- Optuna Feature Selection + Hyperparameter Tuning ---
+logging.info("Starting Optuna feature+hyperparam selection (CV)...")
+feature_hyperparam_study = optuna.create_study(direction="minimize")
+feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200)
 
-best_mask = [feature_selection_study.best_trial.params.get(f, False) for f in FEATURES]
+# Extract best features and params
+best_mask = [feature_hyperparam_study.best_trial.params.get(f, False) for f in FEATURES]
 SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
+best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES}
 logging.info(f"Optuna-selected features ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
+logging.info(f"Optuna-selected params: {best_params}")
 
-# Use SELECTED_FEATURES for final model and ensemble
+# Use SELECTED_FEATURES and best_params for final model and ensemble
 FEATURES = SELECTED_FEATURES
+final_params.update(best_params)
+
+# --- Final Model Training with Selected Features and Best Params ---
+logging.info("Training final model on full training data with selected features and best params...")
+final_model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
+
+# --- Recursive Prediction with Final Model ---
+logging.info("Starting recursive prediction on the test set with final model...")
+history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
+
+for week_num in test_weeks:
+    logging.info(f"Predicting for week {week_num}...")
+    current_week_mask = history_df['week'] == week_num
+    history_df, _, _ = apply_feature_engineering(
+        history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
+    )
+
+    current_features = history_df.loc[current_week_mask, FEATURES]
+    missing_cols = [col for col in FEATURES if col not in current_features.columns]
+    if missing_cols:
+        logging.warning(f"Missing columns during prediction for week {week_num}: {missing_cols}. Filling with 0.")
+        for col in missing_cols:
+            current_features[col] = 0
+    current_features = current_features[FEATURES]
+
+    current_preds = final_model.predict(current_features)
+    current_preds = np.clip(current_preds, 0, None).round().astype(float)
+    history_df.loc[current_week_mask, 'num_orders'] = current_preds
+
+logging.info("Recursive prediction finished.")
+
+final_predictions_df = history_df.loc[history_df['id'].isin(test['id']), ['id', 'num_orders']].copy()
+final_predictions_df['num_orders'] = final_predictions_df['num_orders'].round().astype(int)
+final_predictions_df['id'] = final_predictions_df['id'].astype(int)
+
+# --- Create Submission File ---
+submission_path_final = f"{SUBMISSION_FILE_PREFIX}_final_optuna.csv"
+final_predictions_df.to_csv(submission_path_final, index=False)
+logging.info(f"Final submission file saved to {submission_path_final}")
+
+# --- SHAP Analysis for Final Model ---
+logging.info("Calculating SHAP values for final model...")
+try:
+    if len(train_df) > N_SHAP_SAMPLES:
+        shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
+    else:
+        shap_sample = train_df.copy()
+
+    explainer = shap.TreeExplainer(final_model)
+    shap_values = explainer.shap_values(shap_sample[FEATURES])
+
+    shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
+    shap_values_df.to_csv(f"{SHAP_FILE_PREFIX}_final_optuna_values.csv", index=False)
+
+    shap_importance_df = pd.DataFrame({
+        'feature': FEATURES,
+        'mean_abs_shap': np.abs(shap_values).mean(axis=0)
+    }).sort_values('mean_abs_shap', ascending=False)
+    shap_importance_df.to_csv(f"{SHAP_FILE_PREFIX}_final_optuna_feature_importances.csv", index=False)
+
+    logging.info("Generating SHAP plots for final model...")
+    # Summary Plot
+    plt.figure()
+    shap.summary_plot(shap_values, shap_sample[FEATURES], show=False)
+    plt.tight_layout()
+    plt.savefig(f"{SHAP_FILE_PREFIX}_final_optuna_summary.png")
+    plt.close()
+
+    # Importance Bar Plot (Top 20)
+    plt.figure(figsize=(10, 8))
+    shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
+    plt.gca().invert_yaxis()
+    plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
+    plt.title('Top 20 SHAP Feature Importances (Final Optuna Model)')
+    plt.tight_layout()
+    plt.savefig(f"{SHAP_FILE_PREFIX}_final_optuna_top20_importance.png")
+    plt.close()
+
+    logging.info("SHAP analysis saved for final model.")
+
+except Exception as e:
+    logging.error(f"Error during SHAP analysis for final model: {e}")
+
+# --- Recursive Stacking/Ensembling with Selected Features ---
+def recursive_predict(model, train_df, test_df, FEATURES):
+    """Run recursive prediction for a single model."""
+    history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
+    test_weeks = sorted(test_df['week'].unique())
+    for week_num in test_weeks:
+        current_week_mask = history_df['week'] == week_num
+        history_df, _, _ = apply_feature_engineering(history_df, is_train=False)
+        current_features = history_df.loc[current_week_mask, FEATURES]
+        missing_cols = [col for col in FEATURES if col not in current_features.columns]
+        if missing_cols:
+            for col in missing_cols:
+                current_features[col] = 0
+        current_features = current_features[FEATURES]
+        current_preds = model.predict(current_features)
+        current_preds = np.clip(current_preds, 0, None).round().astype(float)
+        history_df.loc[current_week_mask, 'num_orders'] = current_preds
+    final_predictions = history_df.loc[history_df['id'].isin(test_df['id']), ['id', 'num_orders']].copy()
+    final_predictions['num_orders'] = final_predictions['num_orders'].round().astype(int)
+    final_predictions['id'] = final_predictions['id'].astype(int)
+    return final_predictions.set_index('id')['num_orders']
+
+
+def recursive_ensemble(train_df, test_df, FEATURES, n_models=5):
+    """Train n_models with different seeds, run recursive prediction, and average results."""
+    preds_list = []
+    for i in range(n_models):
+        logging.info(f"Training ensemble model {i+1}/{n_models}...")
+        params = final_params.copy()
+        params['seed'] = SEED + i
+        model = LGBMRegressor(**params)
+        model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
+        preds = recursive_predict(model, train_df, test_df, FEATURES)
+        preds_list.append(preds)
+    # Average predictions
+    ensemble_preds = np.mean(preds_list, axis=0).round().astype(int)
+    return ensemble_preds
+
+# --- Recursive Ensemble Prediction with Selected Features ---
+logging.info("Running recursive ensemble prediction with selected features...")
+ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, n_models=5)
+final_predictions_df['num_orders_ensemble'] = ensemble_preds
+submission_path_ensemble_final = f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv"
+final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble_final, index=False)
+logging.info(f"Ensemble submission file saved to {submission_path_ensemble_final}")
+
+# --- End of Script ---
+logging.info("All tasks completed.")
