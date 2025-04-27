@@ -309,12 +309,13 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     return df_out, weekofyear_means, month_means
 
 # --- One-hot encoding and feature engineering for train/test ---
-logging.info("Applying one-hot encoding and feature engineering...")
+logging.info("Applying feature engineering (no one-hot for native categoricals)...")
 df_full = pd.concat([df, test], ignore_index=True)
 df_full = create_other_features(df_full)
-cat_cols = [col for col in ["category", "cuisine", "center_type"] if col in df_full.columns]
-if cat_cols:
-    df_full = pd.get_dummies(df_full, columns=cat_cols, dummy_na=False) # Avoid NaN columns from dummies
+# Do NOT one-hot encode category, cuisine, center_type; use native categorical handling
+# Remove any one-hot columns if present (from previous runs or merges)
+for prefix in ["category_", "cuisine_", "center_type_"]:
+    df_full = df_full.loc[:, ~df_full.columns.str.startswith(prefix)]
 
 train_df = df_full[df_full['week'].isin(df['week'].unique())].copy()
 test_df = df_full[df_full['week'].isin(test['week'].unique())].copy()
@@ -342,7 +343,8 @@ FEATURES = []
 # Add base features
 base_features = [
     "checkout_price", "base_price", "homepage_featured", "emailer_for_promotion",
-    "discount", "discount_pct", "price_diff", "weekofyear"
+    "discount", "discount_pct", "price_diff", "weekofyear",
+    "category", "cuisine", "center_type", "center_id", "meal_id"
 ]
 for f in base_features:
     if f in train_df.columns and f not in features_set:
@@ -380,12 +382,9 @@ for prefix in ["center_orders_", "meal_orders_", "category_orders_"]:
             FEATURES.append(col)
             features_set.add(col)
 
-# Add one-hot columns if present
+# Remove one-hot columns for categoricals from FEATURES if present
 for prefix in ["category_", "cuisine_", "center_type_"]:
-    for col in train_df.columns:
-        if col.startswith(prefix) and col not in features_set and col != TARGET and col != 'id':
-            FEATURES.append(col)
-            features_set.add(col)
+    FEATURES = [f for f in FEATURES if not f.startswith(prefix)]
 
 # Add seasonality and outlier features
 seasonality_features = [
