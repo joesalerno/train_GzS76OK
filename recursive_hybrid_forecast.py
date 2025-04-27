@@ -22,7 +22,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 30 # Number of Optuna trials
+OPTUNA_TRIALS = 1 # Number of Optuna trials
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -329,7 +329,219 @@ features_to_remove = [
   'center_orders_mean',
   'center_orders_mean_cube',
   'meal_orders_mean',
-  'meal_orders_mean_cube'
+  'meal_orders_mean_cube',
+  # Added from SHAP importances for further testing:
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_14',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5',
+  'num_orders_rolling_mean_2_x_meal_orders_mean',
+  'meal_orders_mean_x_center_orders_mean',
+  'num_orders_rolling_mean_2_x_center_orders_mean',
+  'checkout_price',
+  'num_orders_rolling_mean_2',
+  'mean_orders_by_weekofyear',
+  'num_orders_rolling_mean_5_x_num_orders_rolling_mean_14',
+  'num_orders_rolling_mean_4',
+  'meal_orders_mean_x_homepage_featured',
+  'num_orders_rolling_mean_2_sq',
+  'homepage_featured_rolling_sum_3',
+  'num_orders_rolling_mean_21',
+  'num_orders_rolling_mean_5_x_meal_orders_mean',
+  'meal_orders_mean_x_emailer_for_promotion',
+  'checkout_price_sq',
+  'meal_orders_mean_sq',
+  'num_orders_rolling_mean_28',
+  'meal_orders_std',
+  'num_orders_rolling_mean_2_x_checkout_price',
+  'meal_orders_mean_x_discount_pct',
+  'category_Beverages',
+  'num_orders_rolling_mean_5_x_discount_pct_x_emailer_for_promotion',
+  'num_orders_rolling_mean_2_x_price_diff_x_emailer_for_promotion',
+  'emailer_for_promotion_rolling_sum_3',
+  'base_price',
+  'num_orders_rolling_std_14',
+  'num_orders_rolling_mean_14_x_weekofyear',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_price_diff',
+  'num_orders_rolling_mean_14_x_meal_orders_mean',
+  'price_diff',
+  'meal_orders_mean_x_checkout_price',
+  'meal_orders_mean_x_weekofyear',
+  'num_orders_rolling_mean_5_x_center_orders_mean',
+  'discount_pct_x_emailer_for_promotion',
+  'meal_orders_mean',
+  'checkout_price_x_homepage_featured',
+  'num_orders_rolling_mean_14_x_discount_pct',
+  'checkout_price_x_price_diff',
+  'center_orders_mean_x_discount_pct',
+  'num_orders_rolling_mean_10',
+  'checkout_price_x_weekofyear',
+  'num_orders_rolling_mean_14_x_center_orders_mean',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_discount_pct',
+  'weekofyear_sq',
+  'num_orders_rolling_mean_2_x_discount_pct_x_emailer_for_promotion',
+  'mean_orders_by_month',
+  'center_orders_std',
+  'num_orders_rolling_std_21',
+  'num_orders_rolling_mean_14_x_checkout_price',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_month_cos',
+  'num_orders_rolling_mean_14_x_emailer_for_promotion',
+  'num_orders_rolling_mean_2_x_weekofyear',
+  'num_orders_rolling_mean_3',
+  'num_orders_rolling_std_2',
+  'num_orders_rolling_mean_14_x_price_diff',
+  'discount_pct_x_weekofyear',
+  'num_orders_rolling_mean_5_x_checkout_price',
+  'num_orders_rolling_mean_2_x_discount_pct_x_homepage_featured',
+  'center_orders_mean_x_emailer_for_promotion',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_emailer_for_promotion',
+  'center_orders_mean_sq',
+  'weekofyear_sin',
+  'num_orders_rolling_mean_5',
+  'weekofyear_cos',
+  'center_orders_mean_x_homepage_featured',
+  'num_orders_rolling_mean_5_x_discount_pct_x_homepage_featured',
+  'num_orders_rolling_mean_5_x_discount_pct',
+  'price_diff_sq',
+  'num_orders_rolling_mean_5_x_emailer_for_promotion',
+  'checkout_price_x_emailer_for_promotion',
+  'num_orders_rolling_std_28',
+  'num_orders_rolling_std_6',
+  'weekofyear_x_emailer_for_promotion',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_month_sin',
+  'center_type_TYPE_B',
+  'num_orders_rolling_std_12',
+  'cuisine_Italian',
+  'cuisine_Continental',
+  'num_orders_rolling_std_3',
+  'num_orders_rolling_mean_5_x_price_diff_x_emailer_for_promotion',
+  'num_orders_rolling_mean_5_x_homepage_featured',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_weekofyear_sin',
+  'category_Extras',
+  'month_sin_x_discount_pct_x_emailer_for_promotion',
+  'num_orders_rolling_std_7',
+  'num_orders_rolling_mean_5_x_discount_pct_x_price_diff',
+  'discount_pct_x_homepage_featured',
+  'num_orders_rolling_mean_5_x_weekofyear',
+  'category_Rice Bowl',
+  'discount_pct_sq',
+  'num_orders_rolling_mean_8',
+  'num_orders_rolling_std_8',
+  'cuisine_Thai',
+  'price_diff_x_discount_pct',
+  'discount_pct_x_price_diff_x_emailer_for_promotion',
+  'month_sin',
+  'checkout_price_x_discount_pct',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_homepage_featured',
+  'num_orders_rolling_mean_2_x_num_orders_rolling_mean_5_x_weekofyear_cos',
+  'center_type_TYPE_C',
+  'meal_orders_mean_x_price_diff',
+  'num_orders_rolling_mean_2_x_discount_pct',
+  'discount',
+  'num_orders_rolling_mean_2_x_price_diff',
+  'num_orders_rolling_mean_14',
+  'discount_pct_x_emailer_for_promotion_x_homepage_featured',
+  'category_Salad',
+  'num_orders_rolling_mean_12',
+  'weekofyear_x_homepage_featured',
+  'center_orders_mean_x_price_diff',
+  'month_cos',
+  'center_orders_mean_x_checkout_price',
+  'discount_pct',
+  'num_orders_rolling_std_10',
+  'num_orders_rolling_mean_14_x_homepage_featured',
+  'num_orders_rolling_mean_2_x_weekofyear_sin_x_price_diff',
+  'rolling_mean_2_x_home',
+  'num_orders_rolling_std_5',
+  'num_orders_rolling_mean_5_x_month_sin_x_price_diff',
+  'price_diff_x_weekofyear',
+  'num_orders_rolling_mean_5_x_price_diff_x_homepage_featured',
+  'emailer_for_promotion',
+  'num_orders_rolling_mean_5_x_weekofyear_cos_x_discount_pct',
+  'num_orders_rolling_mean_5_x_month_sin_x_emailer_for_promotion',
+  'is_outlier_weekofyear',
+  'weekofyear_sin_x_emailer_for_promotion_x_homepage_featured',
+  'num_orders_rolling_mean_2_x_month_cos_x_discount_pct',
+  'center_orders_mean_x_weekofyear',
+  'price_diff_x_emailer',
+  'num_orders_rolling_mean_5_x_month_cos_x_emailer_for_promotion',
+  'num_orders_rolling_mean_5_x_emailer_for_promotion_x_homepage_featured',
+  'weekofyear_sin_x_discount_pct_x_price_diff',
+  'num_orders_rolling_mean_5_x_month_sin_x_discount_pct',
+  'num_orders_rolling_mean_5_x_weekofyear_sin_x_price_diff',
+  'num_orders_rolling_mean_2_x_month_sin_x_price_diff',
+  'weekofyear_cos_x_discount_pct_x_emailer_for_promotion',
+  'num_orders_rolling_mean_5_sq',
+  'num_orders_rolling_mean_2_x_month_sin_x_discount_pct',
+  'num_orders_rolling_mean_7',
+  'num_orders_rolling_mean_2_x_weekofyear_sin_x_discount_pct',
+  'num_orders_rolling_std_4',
+  'num_orders_rolling_mean_5_x_month_cos_x_price_diff',
+  'num_orders_rolling_mean_6',
+  'num_orders_rolling_mean_2_x_weekofyear_cos_x_price_diff',
+  'category_Sandwich',
+  'num_orders_rolling_mean_2_x_emailer_for_promotion_x_homepage_featured',
+  'num_orders_rolling_mean_2_x_weekofyear_cos_x_discount_pct',
+  'num_orders_rolling_mean_2_x_month_cos_x_price_diff',
+  'num_orders_rolling_mean_5_x_weekofyear_sin_x_emailer_for_promotion',
+  'num_orders_rolling_mean_5_x_price_diff',
+  'weekofyear_sin_x_price_diff_x_emailer_for_promotion',
+  'month_sin_x_discount_pct_x_price_diff',
+  'num_orders_rolling_mean_2_x_price_diff_x_homepage_featured',
+  'category_Other Snacks',
+  'num_orders_rolling_mean_5_x_month_cos_x_discount_pct',
+  'num_orders_rolling_mean_2_x_homepage_featured',
+  'num_orders_rolling_mean_5_x_weekofyear_cos_x_price_diff',
+  'num_orders_rolling_mean_5_x_weekofyear_sin_x_discount_pct',
+  'num_orders_rolling_mean_5_x_month_cos_x_homepage_featured',
+  'num_orders_rolling_mean_2_x_month_sin_x_emailer_for_promotion',
+  'num_orders_rolling_mean_2_x_month_cos_x_emailer_for_promotion',
+  'num_orders_rolling_mean_2_x_discount_pct_x_price_diff',
+  'price_diff_x_home',
+  'num_orders_rolling_mean_14_sq',
+  'weekofyear_sin_x_discount_pct_x_emailer_for_promotion',
+  'center_orders_mean',
+  'num_orders_rolling_mean_2_x_month_cos_x_homepage_featured',
+  'month_cos_x_discount_pct_x_price_diff',
+  'weekofyear_cos_x_discount_pct_x_homepage_featured',
+  'weekofyear_sin_x_discount_pct_x_homepage_featured',
+  'cuisine_Indian',
+  'center_type_TYPE_A',
+  'rolling_mean_2_x_emailer',
+  'category_Starters',
+  'center_orders_mean_cube',
+  'meal_orders_mean_cube',
+  'weekofyear_cos_x_discount_pct_x_price_diff',
+  'discount_pct_x_price_diff_x_homepage_featured',
+  'num_orders_rolling_mean_5_x_month_sin_x_homepage_featured',
+  'weekofyear_cos_x_price_diff_x_emailer_for_promotion',
+  'weekofyear_sin_x_price_diff_x_homepage_featured',
+  'month_cos_x_price_diff_x_emailer_for_promotion',
+  'num_orders_rolling_mean_5_x_weekofyear_cos_x_homepage_featured',
+  'num_orders_rolling_mean_5_x_weekofyear_cos_x_emailer_for_promotion',
+  'num_orders_rolling_mean_2_x_weekofyear_sin_x_homepage_featured',
+  'num_orders_rolling_mean_2_x_weekofyear_cos_x_emailer_for_promotion',
+  'num_orders_rolling_mean_5_x_weekofyear_sin_x_homepage_featured',
+  'month_cos_x_discount_pct_x_homepage_featured',
+  'month_sin_x_price_diff_x_emailer_for_promotion',
+  'weekofyear_cos_x_emailer_for_promotion_x_homepage_featured',
+  'month_sin_x_price_diff_x_homepage_featured',
+  'weekofyear_cos_x_price_diff_x_homepage_featured',
+  'month_cos_x_price_diff_x_homepage_featured',
+  'category_Seafood',
+  'category_Pizza',
+  'category_Desert',
+  'num_orders_rolling_mean_2_x_emailer_for_promotion',
+  'category_Fish',
+  'month_cos_x_emailer_for_promotion_x_homepage_featured',
+  'price_diff_x_homepage_featured',
+  'month_sin_x_emailer_for_promotion_x_homepage_featured',
+  'is_outlier_month',
+  'category_Soup',
+  'emailer_for_promotion_sq',
+  'category_Pasta',
+  'homepage_featured',
+  'homepage_featured_sq',
+  'emailer_for_promotion_x_homepage_featured',
+  'category_Biryani',
 ]
 # FEATURES = [f for f in FEATURES if f not in features_to_remove]
 logging.info(f"Removed manually identified correlated features. {len(FEATURES)} features remain.")
@@ -496,6 +708,56 @@ feature_removal_experiment(train_split_df, valid_df, FEATURES, features_to_test,
 
 
 
+# --- Cross-Validation Feature Removal Experiment ---
+from sklearn.model_selection import KFold
+
+def crossval_feature_removal_experiment(df, FEATURES, features_to_test, TARGET, model_params, n_splits=5):
+    """
+    For each feature in features_to_test, remove it from FEATURES, run KFold CV, and report mean/STD RMSLE.
+    Returns a DataFrame with feature, mean RMSLE, std RMSLE, and delta vs. baseline.
+    """
+    results = []
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=SEED)
+    # Baseline
+    baseline_scores = []
+    for train_idx, valid_idx in kf.split(df):
+        train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
+        model = LGBMRegressor(**model_params)
+        model.fit(train_fold[FEATURES], train_fold[TARGET])
+        preds = model.predict(valid_fold[FEATURES])
+        baseline_scores.append(rmsle(valid_fold[TARGET], preds))
+    baseline_mean = np.mean(baseline_scores)
+    baseline_std = np.std(baseline_scores)
+    results.append({'feature': 'BASELINE', 'mean_rmsle': baseline_mean, 'std_rmsle': baseline_std, 'delta_vs_baseline': 0.0})
+    # Test each feature
+    for feat in features_to_test:
+        if feat not in FEATURES:
+            continue
+        test_features = [f for f in FEATURES if f != feat]
+        scores = []
+        for train_idx, valid_idx in kf.split(df):
+            train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
+            model = LGBMRegressor(**model_params)
+            model.fit(train_fold[test_features], train_fold[TARGET])
+            preds = model.predict(valid_fold[test_features])
+            scores.append(rmsle(valid_fold[TARGET], preds))
+        mean_score = np.mean(scores)
+        std_score = np.std(scores)
+        results.append({'feature': feat, 'mean_rmsle': mean_score, 'std_rmsle': std_score, 'delta_vs_baseline': mean_score - baseline_mean})
+    results_df = pd.DataFrame(results)
+    results_df = results_df.sort_values('mean_rmsle')
+    results_df.to_csv('crossval_feature_removal_experiment.csv', index=False)
+    print('Cross-validation feature removal experiment results saved to crossval_feature_removal_experiment.csv')
+    return results_df
+
+# --- Run Cross-Validation Feature Removal Experiment ---
+features_to_test = features_to_remove
+model_params = get_lgbm().get_params()
+model_params['n_estimators'] = 300 # Use fewer estimators for speed
+crossval_feature_removal_experiment(train_split_df, FEATURES, features_to_test, TARGET, model_params, n_splits=5)
+
+
+
 final_model = LGBMRegressor(**final_params)
 
 # Train on the entire training dataset (train_split_df + valid_df)
@@ -621,7 +883,8 @@ def prune_features_by_shap_and_corr(train_df, FEATURES, shap_importance_path, co
                     to_remove.add(f1)
     pruned_features = [f for f in keep_features if f not in to_remove]
     logging.info(f"Pruned features from {len(FEATURES)} to {len(pruned_features)} using only correlation.")
-    return pruned_features
+    return FEATURES # Uncomment the following line to run the pruning function
+    # return pruned_features
 
 # --- Prune features before final model training ---
 shap_importance_path = f"{SHAP_FILE_PREFIX}_optuna_feature_importances.csv"
