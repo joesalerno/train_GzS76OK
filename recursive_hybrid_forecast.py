@@ -1001,7 +1001,9 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_mean
     preds_list = []
     for i in range(n_models):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
-        model = LGBMRegressor(**final_params, seed=SEED+i)
+        params = final_params.copy()
+        params.pop('seed', None)
+        model = LGBMRegressor(**params, seed=SEED+i)
         model.fit(train_df[FEATURES], train_df[TARGET])
         preds = recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means)
         preds_list.append(preds.values)
@@ -1210,8 +1212,8 @@ def recursive_ensemble(train_df, test_df, FEATURES, n_models=5):
     for i in range(n_models):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
         params = final_params.copy()
-        params['seed'] = SEED + i
-        model = LGBMRegressor(**params)
+        params.pop('seed', None)
+        model = LGBMRegressor(**params, seed=SEED+i)
         model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
         preds = recursive_predict(model, train_df, test_df, FEATURES)
         preds_list.append(preds.values)
