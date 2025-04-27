@@ -164,8 +164,10 @@ def create_advanced_interactions(df):
                     if sum(f in time_feats for f in [f1, f2, f3]) <= 1:
                         colname = f'{f1}_x_{f2}_x_{f3}'
                         third_order_dict[colname] = df_out[f1] * df_out[f2] * df_out[f3]
-    if third_order_dict:
-        df_out = pd.concat([df_out, pd.DataFrame(third_order_dict, index=df_out.index)], axis=1)
+    # Only add new columns that do not already exist
+    new_cols = {k: v for k, v in third_order_dict.items() if k not in df_out.columns}
+    if new_cols:
+        df_out = pd.concat([df_out, pd.DataFrame(new_cols, index=df_out.index)], axis=1)
     return df_out
 
 # --- Seasonality Smoothing and Outlier Flags ---
