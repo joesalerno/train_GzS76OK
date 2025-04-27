@@ -868,8 +868,24 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'verbose': -1,
         'metric': 'None',
     }
-    # Feature selection mask
-    selected_features = [f for f in FEATURES if trial.suggest_categorical(f, [True, False])]
+    # Cyclical feature pairs
+    cyclical_pairs = [
+        ('weekofyear_sin', 'weekofyear_cos'),
+        ('month_sin', 'month_cos'),
+    ]
+    selected_features = []
+    # Handle cyclical pairs as a group
+    for sin_feat, cos_feat in cyclical_pairs:
+        use_pair = trial.suggest_categorical(f"{sin_feat}_{cos_feat}_pair", [True, False])
+        if use_pair:
+            selected_features.extend([sin_feat, cos_feat])
+    # Handle all other features (not in any cyclical pair)
+    cyclical_flat = set([f for pair in cyclical_pairs for f in pair])
+    for f in FEATURES:
+        if f in cyclical_flat:
+            continue  # Already handled
+        if trial.suggest_categorical(f, [True, False]):
+            selected_features.append(f)
     if len(selected_features) < 10:
         return float('inf')
     kf = KFold(n_splits=3, shuffle=True, random_state=SEED)
