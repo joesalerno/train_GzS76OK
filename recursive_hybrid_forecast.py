@@ -22,7 +22,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 16 # Number of Optuna trials (increased for better search)
+OPTUNA_TRIALS = 500 # Number of Optuna trials (increased for better search)
 OPTUNA_NJOBS = 1  # Use sequential Optuna trials for best resource usage with LGBM
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
@@ -82,7 +82,7 @@ def create_temporal_features(df):
 
 def create_lag_rolling_features(df, target_col='num_orders', lag_weeks=LAG_WEEKS, rolling_windows=ROLLING_WINDOWS):
     df_out = df.copy()
-    group = df_out.groupby(GROUP_COLS)
+    group = df_out.groupby(GROUP_COLS, observed=False)
     for lag in lag_weeks:
         df_out[f"{target_col}_lag_{lag}"] = group[target_col].shift(lag)
     shifted = group[target_col].shift(1)
@@ -93,7 +93,7 @@ def create_lag_rolling_features(df, target_col='num_orders', lag_weeks=LAG_WEEKS
 
 def create_other_features(df):
     df_out = df.copy()
-    group = df_out.groupby(GROUP_COLS)
+    group = df_out.groupby(GROUP_COLS, observed=False)
     df_out["discount"] = df_out["base_price"] - df_out["checkout_price"]
     df_out["discount_pct"] = df_out["discount"] / df_out["base_price"].replace(0, np.nan)
     df_out["price_diff"] = group["checkout_price"].diff()
@@ -105,15 +105,15 @@ def create_other_features(df):
 def create_group_aggregates(df):
     df_out = df.copy()
     # Center-level aggregates
-    df_out['center_orders_mean'] = df_out.groupby('center_id')['num_orders'].transform('mean')
-    df_out['center_orders_std'] = df_out.groupby('center_id')['num_orders'].transform('std')
+    df_out['center_orders_mean'] = df_out.groupby('center_id', observed=False)['num_orders'].transform('mean')
+    df_out['center_orders_std'] = df_out.groupby('center_id', observed=False)['num_orders'].transform('std')
     # Meal-level aggregates
-    df_out['meal_orders_mean'] = df_out.groupby('meal_id')['num_orders'].transform('mean')
-    df_out['meal_orders_std'] = df_out.groupby('meal_id')['num_orders'].transform('std')
+    df_out['meal_orders_mean'] = df_out.groupby('meal_id', observed=False)['num_orders'].transform('mean')
+    df_out['meal_orders_std'] = df_out.groupby('meal_id', observed=False)['num_orders'].transform('std')
     # Category-level aggregates (if available)
     if 'category' in df_out.columns:
-        df_out['category_orders_mean'] = df_out.groupby('category')['num_orders'].transform('mean')
-        df_out['category_orders_std'] = df_out.groupby('category')['num_orders'].transform('std')
+        df_out['category_orders_mean'] = df_out.groupby('category', observed=False)['num_orders'].transform('mean')
+        df_out['category_orders_std'] = df_out.groupby('category', observed=False)['num_orders'].transform('std')
     return df_out
 
 def create_interaction_features(df):
