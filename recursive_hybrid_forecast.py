@@ -302,21 +302,37 @@ logging.info(f"Using {len(FEATURES)} features: {FEATURES}")
 
 
 # --- Remove manually identified highly correlated features ---
-# features_to_remove = [
-#     'base_price',
-#     'num_orders_rolling_mean_3',
-#     'num_orders_rolling_mean_5',
-#     'num_orders_rolling_mean_7',
-#     'rolling_mean_2_x_home',
-#     'meal_orders_std_log1p',
-#     'checkout_price_sq',
-#     'checkout_price_log1p',
-#     'rolling_mean_2_x_emailer_log1p',
-#     'center_orders_mean',
-#     'meal_orders_mean',
-# ]
+features_to_remove = [
+  'base_price',
+  'discount',
+  'num_orders_rolling_mean_3',
+  'num_orders_rolling_mean_5',
+  'num_orders_rolling_std_5',
+  'num_orders_rolling_mean_6',
+  'num_orders_rolling_mean_7',
+  'num_orders_rolling_std_7',
+  'num_orders_rolling_mean_8',
+  'num_orders_rolling_std_10',
+  'num_orders_rolling_mean_12',
+  'num_orders_rolling_std_12',
+  'num_orders_rolling_mean_14',
+  'num_orders_rolling_mean_21',
+  'price_diff_x_emailer',
+  'checkout_price_sq',
+  'emailer_for_promotion_sq',
+  'homepage_featured_sq',
+  'num_orders_rolling_mean_2_x_emailer_for_promotion',
+  'num_orders_rolling_mean_2_x_homepage_featured',
+  'price_diff_x_emailer_for_promotion',
+  'price_diff_x_homepage_featured',
+  'num_orders_rolling_mean_2_x_discount_pct_x_homepage_featured',
+  'center_orders_mean',
+  'center_orders_mean_cube',
+  'meal_orders_mean',
+  'meal_orders_mean_cube'
+]
 # FEATURES = [f for f in FEATURES if f not in features_to_remove]
-# logging.info(f"Removed manually identified correlated features. {len(FEATURES)} features remain.")
+logging.info(f"Removed manually identified correlated features. {len(FEATURES)} features remain.")
 
 # --- Train/validation split ---
 max_week = train_df["week"].max()
@@ -363,7 +379,6 @@ def get_lgbm(params=None):
         if 'eval_metric' in params and params['eval_metric'] == lgb_rmsle:
              default_params['metric'] = 'None'
     return LGBMRegressor(**default_params)
-
 
 # --- Optuna Hyperparameter Tuning ---
 logging.info("Starting Optuna hyperparameter tuning...")
@@ -422,6 +437,12 @@ best_params = study.best_params
 logging.info(f"Best Optuna params: {best_params}")
 logging.info(f"Best validation RMSLE: {study.best_value:.5f}")
 
+
+
+
+
+
+
 # --- Final Model Training ---
 logging.info("Training final model on full training data with best params...")
 # Merge best params with fixed params for the final model
@@ -435,6 +456,45 @@ final_params = {
     'metric': 'None'
 }
 final_params.update(best_params) # Best params from Optuna override defaults
+
+
+# --- Feature Removal Experiment ---
+def feature_removal_experiment(train_df, valid_df, FEATURES, features_to_test, TARGET, model_params, n_trials=1):
+    """
+    For each feature in features_to_test, remove it from FEATURES, retrain, and report validation RMSLE.
+    Returns a DataFrame with feature, RMSLE, and delta vs. baseline.
+    """
+    import copy
+    results = []
+    # Baseline
+    model = LGBMRegressor(**model_params)
+    model.fit(train_df[FEATURES], train_df[TARGET])
+    preds = model.predict(valid_df[FEATURES])
+    baseline_rmsle = rmsle(valid_df[TARGET], preds)
+    results.append({'feature': 'BASELINE', 'rmsle': baseline_rmsle, 'delta_vs_baseline': 0.0})
+    # Test each feature
+    for feat in features_to_test:
+        if feat not in FEATURES:
+            continue
+        test_features = [f for f in FEATURES if f != feat]
+        model = LGBMRegressor(**model_params)
+        model.fit(train_df[test_features], train_df[TARGET])
+        preds = model.predict(valid_df[test_features])
+        rmsle_score = rmsle(valid_df[TARGET], preds)
+        results.append({'feature': feat, 'rmsle': rmsle_score, 'delta_vs_baseline': rmsle_score - baseline_rmsle})
+    results_df = pd.DataFrame(results)
+    results_df = results_df.sort_values('rmsle')
+    results_df.to_csv('feature_removal_experiment.csv', index=False)
+    print('Feature removal experiment results saved to feature_removal_experiment.csv')
+    return results_df
+
+# --- Run Feature Removal Experiment ---
+features_to_test = features_to_remove
+model_params = final_params.copy()
+model_params['n_estimators'] = 500 # Use fewer estimators for speed
+feature_removal_experiment(train_split_df, valid_df, FEATURES, features_to_test, TARGET, model_params)
+
+
 
 final_model = LGBMRegressor(**final_params)
 
