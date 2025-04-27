@@ -417,6 +417,60 @@ def lgb_rmsle(y_true, y_pred):
     """RMSLE metric for LightGBM"""
     return 'rmsle', rmsle(y_true, y_pred), False # lower is better
 
+# --- Custom Early Stopping Callback with Overfitting Detection ---
+def early_stopping_with_overfit(stopping_rounds=100, overfit_rounds=20, verbose=False):
+    """
+    Custom LightGBM callback for early stopping with overfitting detection.
+    Stops if validation loss doesn't improve for `stopping_rounds` OR
+    if validation loss increases for `overfit_rounds` while training loss decreases.
+    """
+    best_score = [float('inf')]
+    best_iter = [0]
+    overfit_count = [0]
+    prev_train_loss = [float('inf')]
+    prev_valid_loss = [float('inf')]
+    def _callback(env):
+        # Find train and valid loss
+        train_loss = None
+        valid_loss = None
+        for eval_tuple in env.evaluation_result_list:
+            name = eval_tuple[0]
+            loss = eval_tuple[1]
+            if 'train' in name:
+                train_loss = loss
+            elif 'valid' in name or 'validation' in name:
+                valid_loss = loss
+        if valid_loss is None or train_loss is None:
+            return
+        # Early stopping (standard)
+        if valid_loss < best_score[0]:
+            best_score[0] = valid_loss
+            best_iter[0] = env.iteration
+            overfit_count[0] = 0
+        else:
+            # Overfitting detection: valid loss increases, train loss decreases
+            if valid_loss > prev_valid_loss[0] and train_loss < prev_train_loss[0]:
+                overfit_count[0] += 1
+            else:
+                overfit_count[0] = 0
+        prev_train_loss[0] = train_loss
+        prev_valid_loss[0] = valid_loss
+        # Verbose
+        if verbose and env.iteration % 10 == 0:
+            print(f"[Iter {env.iteration}] train: {train_loss:.5f}, valid: {valid_loss:.5f}, overfit_count: {overfit_count[0]}")
+        # Stop if overfitting detected
+        if overfit_count[0] >= overfit_rounds:
+            if verbose:
+                print(f"Stopping early due to overfitting at iteration {env.iteration}")
+            raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
+        # Standard early stopping
+        if env.iteration - best_iter[0] >= stopping_rounds:
+            if verbose:
+                print(f"Stopping early due to no improvement at iteration {env.iteration}")
+            raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
+    _callback.order = 10
+    return _callback
+
 # --- Final Model Training ---
 logging.info("Training final model on full training data with best params...")
 # Use best_params from Optuna feature+hyperparam selection, merged with fixed params
@@ -484,7 +538,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
             train_split_df.iloc[valid_idx][TARGET],
             LGBMRegressor(**params).fit(
                 train_split_df.iloc[train_idx][selected_features],
-                train_split_df.iloc[train_idx][TARGET]
+                train_split_df.iloc[train_idx][TARGET],
+                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
+                          (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
+                eval_metric=lgb_rmsle,
+                callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
             ).predict(train_split_df.iloc[valid_idx][selected_features])
         )
         for train_idx, valid_idx in kf.split(train_split_df)
@@ -526,7 +584,12 @@ final_params.update(best_params)
 # --- Final Model Training with Selected Features and Best Params ---
 logging.info("Training final model on full training data with selected features and best params...")
 final_model = LGBMRegressor(**final_params)
-final_model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
+final_model.fit(
+    train_df[FEATURES], train_df[TARGET],
+    eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
+    eval_metric=lgb_rmsle,
+    callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
+)
 
 # --- Recursive Prediction with Final Model ---
 logging.info("Starting recursive prediction on the test set with final model...")
@@ -632,13 +695,18 @@ def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None,
 
 
 def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=5, eval_metric=None):
-    """Parallelized ensemble training and prediction."""
+    """Parallelized ensemble training and prediction with early stopping and overfitting detection."""
     def train_and_predict(i):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
         params = final_params.copy(); params.pop('seed', None)
         model = LGBMRegressor(**params, seed=SEED+i)
         if eval_metric:
-            model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=eval_metric)
+            model.fit(
+                train_df[FEATURES], train_df[TARGET],
+                eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
+                eval_metric=eval_metric,
+                callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
+            )
         else:
             model.fit(train_df[FEATURES], train_df[TARGET])
         return recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values
