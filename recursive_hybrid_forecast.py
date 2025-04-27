@@ -1,6 +1,10 @@
 import matplotlib
 matplotlib.use('Agg')
 
+import os
+OUTPUT_DIRECTORY = "output"
+os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
+
 import pandas as pd
 import numpy as np
 from lightgbm import LGBMRegressor
@@ -552,7 +556,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
             LGBMRegressor(**params).fit(
                 train_split_df.iloc[train_idx][selected_features],
                 train_split_df.iloc[train_idx][TARGET],
-                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
+                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_split_df][TARGET]),
                           (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
                 eval_metric=lgb_rmsle,
                 callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
@@ -643,7 +647,7 @@ final_predictions_df['num_orders'] = final_predictions_df['num_orders'].round().
 final_predictions_df['id'] = final_predictions_df['id'].astype(int)
 
 # --- Create Submission File ---
-submission_path_final = f"{SUBMISSION_FILE_PREFIX}_final_optuna.csv"
+submission_path_final = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna.csv")
 final_predictions_df.to_csv(submission_path_final, index=False)
 logging.info(f"Final submission file saved to {submission_path_final}")
 
@@ -657,17 +661,18 @@ try:
     explainer = shap.TreeExplainer(final_model)
     shap_values = explainer.shap_values(shap_sample[FEATURES])
     shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
-    shap_values_df.to_csv(f"{SHAP_FILE_PREFIX}_final_optuna_values.csv", index=False)
+    shap_values_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_values.csv"), index=False)
+    # Save as .npy for further analysis
+    np.save(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_values.npy"), shap_values)
     shap_importance_df = pd.DataFrame({
         'feature': FEATURES,
         'mean_abs_shap': np.abs(shap_values).mean(axis=0)
     }).sort_values('mean_abs_shap', ascending=False)
-    shap_importance_df.to_csv(f"{SHAP_FILE_PREFIX}_final_optuna_feature_importances.csv", index=False)
-    logging.info("Generating SHAP plots for final model...")
+    shap_importance_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_feature_importances.csv"), index=False)
     plt.figure()
-    shap.summary_plot(shap_values, shap_sample[FEATURES], show=False)
+    shap.summary_plot(shap_values, shap_sample[FEATURES], show=False, max_display=len(FEATURES))
     plt.tight_layout()
-    plt.savefig(f"{SHAP_FILE_PREFIX}_final_optuna_summary.png")
+    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_summary_all_features.png"))
     plt.close()
     plt.figure(figsize=(10, 8))
     shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
@@ -675,8 +680,23 @@ try:
     plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
     plt.title('Top 20 SHAP Feature Importances (Final Optuna Model)')
     plt.tight_layout()
-    plt.savefig(f"{SHAP_FILE_PREFIX}_final_optuna_top20_importance.png")
+    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_top20_importance.png"))
     plt.close()
+    for feat in shap_importance_df['feature']:
+        plt.figure()
+        shap.dependence_plot(feat, shap_values, shap_sample[FEATURES], show=False)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_dependence_{feat}.png"))
+        plt.close()
+    try:
+        shap_interaction_values = explainer.shap_interaction_values(shap_sample[FEATURES])
+        plt.figure()
+        shap.summary_plot(shap_interaction_values, shap_sample[FEATURES], show=False, max_display=20)
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_interaction_summary.png"))
+        plt.close()
+    except Exception as e:
+        logging.warning(f"Could not generate SHAP interaction summary plot: {e}")
     logging.info("SHAP analysis saved for final model.")
 except Exception as e:
     logging.error(f"Error during SHAP analysis for final model: {e}")
@@ -695,7 +715,7 @@ try:
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("validation_actual_vs_predicted.png")
+    plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted.png"))
     plt.close()
     logging.info("Validation plot saved.")
 except Exception as e:
@@ -744,7 +764,7 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
 logging.info("Running recursive ensemble prediction with selected features...")
 ensemble_preds = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=5, eval_metric=lgb_rmsle)
 final_predictions_df['num_orders_ensemble'] = ensemble_preds
-submission_path_ensemble_final = f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv"
+submission_path_ensemble_final = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv")
 final_predictions_df[['id', 'num_orders_ensemble']].rename(columns={'num_orders_ensemble': 'num_orders'}).to_csv(submission_path_ensemble_final, index=False)
 logging.info(f"Ensemble submission file saved to {submission_path_ensemble_final}")
 
