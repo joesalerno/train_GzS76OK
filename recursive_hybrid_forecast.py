@@ -454,10 +454,26 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'verbose': -1,
         'metric': 'None',
     }
-    cyclical_pairs = [('weekofyear_sin', 'weekofyear_cos'), ('month_sin', 'month_cos')]
-    cyclical_flat = {f for pair in cyclical_pairs for f in pair}
-    selected_features = [f for sin, cos in cyclical_pairs if trial.suggest_categorical(f"{sin}_{cos}_pair", [True, False]) for f in (sin, cos)]
-    selected_features += [f for f in FEATURES if f not in cyclical_flat and trial.suggest_categorical(f, [True, False])]
+    # Find all features with sin/cos in their name (excluding those already in a pair)
+    sincos_features = [f for f in FEATURES if ('sin' in f or 'cos' in f)]
+    # Group into pairs by prefix (e.g. 'num_orders_rolling_mean_2_x_weekofyear')
+    import re
+    pair_prefixes = set()
+    pair_map = {}
+    for f in sincos_features:
+        m = re.match(r'(.*)_sin$', f)
+        if m and f.replace('_sin', '_cos') in sincos_features:
+            prefix = m.group(1)
+            pair_prefixes.add(prefix)
+            pair_map[prefix] = (f, f.replace('_sin', '_cos'))
+    # For each pair, add a trial param
+    selected_features = []
+    for prefix, (sin, cos) in pair_map.items():
+        pair_name = f"{sin}_{cos}_pair"
+        if trial.suggest_categorical(pair_name, [True, False]):
+            selected_features.extend([sin, cos])
+    # Only tune non-sin/cos features individually
+    selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
     if len(selected_features) < 10:
         return float('inf')
     kf = KFold(n_splits=3, shuffle=True, random_state=SEED)
