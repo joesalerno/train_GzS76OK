@@ -8,6 +8,7 @@ import logging
 import lightgbm as lgb  # Added for early stopping callback
 from sklearn.model_selection import KFold
 from sklearn.linear_model import LinearRegression
+from tqdm import tqdm
 
 # --- Configuration ---
 DATA_PATH = "train.csv"
@@ -729,7 +730,6 @@ def feature_removal_experiment(train_df, valid_df, FEATURES, features_to_test, T
     For each feature in features_to_test, remove it from FEATURES, retrain, and report validation RMSLE.
     Returns a DataFrame with feature, RMSLE, and delta vs. baseline.
     """
-    import copy
     results = []
     # Baseline
     model = LGBMRegressor(**model_params)
@@ -738,7 +738,7 @@ def feature_removal_experiment(train_df, valid_df, FEATURES, features_to_test, T
     baseline_rmsle = rmsle(valid_df[TARGET], preds)
     results.append({'feature': 'BASELINE', 'rmsle': baseline_rmsle, 'delta_vs_baseline': 0.0})
     # Test each feature
-    for feat in features_to_test:
+    for feat in tqdm(features_to_test, desc='Feature Removal Experiment'):
         if feat not in FEATURES:
             continue
         test_features = [f for f in FEATURES if f != feat]
@@ -773,7 +773,7 @@ def crossval_feature_removal_experiment(df, FEATURES, features_to_test, TARGET, 
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=SEED)
     # Baseline
     baseline_scores = []
-    for train_idx, valid_idx in kf.split(df):
+    for train_idx, valid_idx in tqdm(list(kf.split(df)), desc='CV Baseline'):
         train_fold, valid_fold = df.iloc[train_idx], df.iloc[valid_idx]
         model = LGBMRegressor(**model_params)
         model.fit(train_fold[FEATURES], train_fold[TARGET])
@@ -783,7 +783,7 @@ def crossval_feature_removal_experiment(df, FEATURES, features_to_test, TARGET, 
     baseline_std = np.std(baseline_scores)
     results.append({'feature': 'BASELINE', 'mean_rmsle': baseline_mean, 'std_rmsle': baseline_std, 'delta_vs_baseline': 0.0})
     # Test each feature
-    for feat in features_to_test:
+    for feat in tqdm(features_to_test, desc='CV Feature Removal'):
         if feat not in FEATURES:
             continue
         test_features = [f for f in FEATURES if f != feat]
