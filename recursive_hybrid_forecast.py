@@ -505,8 +505,12 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
         'lambda_l1': trial.suggest_float('lambda_l1', 1e-3, 10.0, log=True),
         'lambda_l2': trial.suggest_float('lambda_l2', 1e-3, 10.0, log=True),
+        'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 100),
+        'subsample_for_bin': trial.suggest_int('subsample_for_bin', 20000, 300000),
+        'boosting_type': trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss']),
+        'max_bin': trial.suggest_int('max_bin', 128, 512),
         'objective': 'regression_l1',
-        'boosting_type': 'gbdt',
         'n_estimators': 500,
         'seed': SEED,
         'n_jobs': -1,
@@ -541,7 +545,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
             LGBMRegressor(**params).fit(
                 train_split_df.iloc[train_idx][selected_features],
                 train_split_df.iloc[train_idx][TARGET],
-                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
+                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_split_df][TARGET]),
                           (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
                 eval_metric=lgb_rmsle,
                 callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
