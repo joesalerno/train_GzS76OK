@@ -593,7 +593,7 @@ class TqdmOptunaCallback:
             self.best_value = trial.value
             self.best_trial = trial.number
             # ANSI green for new best
-            msg = f"\033[92mTrial {trial.number} finished with value: {trial.value:.5f} | BEST: {self.best_value:.5f} \033[0m | Features: {n_features} | Params: {params_str}"
+            msg = f"\033[92mTrial {trial.number} finished with value: {trial.value:.5f} | BEST: {self.best_value:.5f}\033[0m | Features: {n_features} | Params: {params_str}"
         elif trial.number % self.print_every == 0:
             msg = f"Trial {trial.number} finished with value: {trial.value:.5f} | Best: {self.best_value:.5f} | Features: {n_features} | Params: {params_str}"
         if msg:
