@@ -411,6 +411,36 @@ features_to_remove = []
 FEATURES = [f for f in FEATURES if f not in features_to_remove]
 logging.info(f"Removed manually identified correlated features. {len(FEATURES)} features remain.")
 
+
+
+# --- Save and plot feature values before training ---
+# feature_values_path = os.path.join(OUTPUT_DIRECTORY, "train_feature_values_before_training.csv")
+# train_df[FEATURES].to_csv(feature_values_path, index=False)
+# logging.info(f"Feature values before training saved to {feature_values_path}")
+
+# # Print a sample to the log
+# logging.info("Sample of feature values before training:\n%s", train_df[FEATURES].head().to_string())
+
+# # Plot feature distributions (histogram for numeric, bar for categorical)
+# import matplotlib.pyplot as plt
+# import seaborn as sns
+
+# for col in FEATURES:
+#     plt.figure(figsize=(6, 3))
+#     if str(train_df[col].dtype) == "category" or train_df[col].nunique() < 20:
+#         # Bar plot for categorical/low-cardinality
+#         train_df[col].value_counts().sort_index().plot(kind="bar")
+#         plt.ylabel("Count")
+#     else:
+#         # Histogram for numeric
+#         sns.histplot(train_df[col].dropna(), kde=False, bins=30)
+#         plt.ylabel("Frequency")
+#     plt.title(f"Distribution of {col}")
+#     plt.tight_layout()
+#     plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"feature_dist_{col}.png"))
+#     plt.close()
+
+
 # --- Train/validation split ---
 max_week = train_df["week"].max()
 valid_df = train_df[train_df["week"] > max_week - VALIDATION_WEEKS].copy()
