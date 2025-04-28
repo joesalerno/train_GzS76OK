@@ -556,6 +556,19 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
 
 # --- Optuna Feature Selection + Hyperparameter Tuning ---
 logging.info("Starting Optuna feature+hyperparam selection (Cross Validation)...")
+# Reduce Optuna logging verbosity
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+# Custom callback: print only when a new best trial is found
+class PrintBestTrialCallback:
+    def __init__(self):
+        self.best_value = float('inf')
+    def __call__(self, study, trial):
+        if trial.value is not None and trial.value < self.best_value:
+            self.best_value = trial.value
+            print(f"[Optuna] New best value: {trial.value:.5f} at trial {trial.number}")
+
+# TqdmOptunaCallback for progress bar
 class TqdmOptunaCallback:
     def __init__(self, n_trials):
         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0)
@@ -563,10 +576,12 @@ class TqdmOptunaCallback:
         self.pbar.update(1)
     def close(self):
         self.pbar.close()
+
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS)
+print_best_callback = PrintBestTrialCallback()
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
-feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=OPTUNA_NJOBS)
+feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback, print_best_callback], n_jobs=OPTUNA_NJOBS)
 optuna_callback.close()
 
 # Extract best features and params
