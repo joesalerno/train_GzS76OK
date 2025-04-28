@@ -517,6 +517,13 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'verbose': -1,
         'metric': 'None',
     }
+    # Only set bagging params if not using GOSS
+    if params['boosting_type'] != 'goss':
+        params['bagging_fraction'] = trial.suggest_float('bagging_fraction', 0.6, 1.0)
+        params['bagging_freq'] = trial.suggest_int('bagging_freq', 1, 7)
+    else:
+        params['bagging_fraction'] = 1.0
+        params['bagging_freq'] = 0
     # Find all features with sin/cos in their name (excluding those already in a pair)
     sincos_features = [f for f in FEATURES if re.search(r'(_sin|_cos)', f)]
     # Group into pairs by prefix (e.g. 'num_orders_rolling_mean_2_x_weekofyear')
