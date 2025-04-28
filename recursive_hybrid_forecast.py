@@ -680,7 +680,7 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
                 train_df[FEATURES], train_df[TARGET],
                 eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
                 eval_metric=eval_metric,
-                callbacks=[early_stopping_with_overfit(200, 20, verbose=False)],
+                callbacks=[early_stopping_with_overfit(300, 20, verbose=False)],
                 categorical_feature=CATEGORICAL_FEATURES
             )
         else:
@@ -837,7 +837,7 @@ def recursive_ensemble_two_stage(train_df, test_df, FEATURES, feature_models, we
                 train_df[FEATURES], train_df[TARGET],
                 eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
                 eval_metric=eval_metric,
-                callbacks=[early_stopping_with_overfit(200, 20, verbose=False)],
+                callbacks=[early_stopping_with_overfit(300, 20, verbose=False)],
                 categorical_feature=CATEGORICAL_FEATURES
             )
         else:
