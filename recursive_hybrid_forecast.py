@@ -575,12 +575,22 @@ class TqdmOptunaCallback:
     def __call__(self, study, trial):
         self.pbar.update(1)
         msg = None
+        # Count number of features selected (if available)
+        n_features = sum([v for k, v in trial.params.items() if isinstance(v, bool) and v])
+        # Show only main hyperparameters (not feature selectors)
+        main_params = {k: v for k, v in trial.params.items() if not isinstance(v, bool) and not k.endswith('_pair')}
+        def fmt_val(val):
+            if isinstance(val, float):
+                return f"{val:.6f}"
+            return str(val)
+        params_str = ', '.join(f"{k}={fmt_val(v)}" for k, v in list(main_params.items())[:5])
         if trial.value is not None and trial.value < self.best_value:
             self.best_value = trial.value
             self.best_trial = trial.number
-            msg = f"Trial {trial.number} finished with value: {trial.value:.5f} [NEW BEST]"
+            # ANSI green for new best
+            msg = f"\033[92mTrial {trial.number} finished with value: {trial.value:.5f} [NEW BEST]\033[0m | Best: {self.best_value:.5f} | Features: {n_features} | Params: {params_str}"
         elif trial.number % self.print_every == 0:
-            msg = f"Trial {trial.number} finished with value: {trial.value:.5f}"
+            msg = f"Trial {trial.number} finished with value: {trial.value:.5f} | Best: {self.best_value:.5f} | Features: {n_features} | Params: {params_str}"
         if msg:
             tqdm.write(msg)
     def close(self):
@@ -601,7 +611,7 @@ logging.info(f"Optuna-selected features ({len(SELECTED_FEATURES)}): {SELECTED_FE
 logging.info(f"Optuna-selected params: {best_params}")
 logging.info(f"Optuna-selected cyclical pairs: {selected_pairs}")
 
-# Use SELECTED_FEATURES and best_params for final model and ensemble
+# Use SELECTED_FEATURES for final model and ensemble
 FEATURES = SELECTED_FEATURES
 final_params.update(best_params)
 
