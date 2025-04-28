@@ -474,7 +474,6 @@ def early_stopping_with_overfit(stopping_rounds=100, overfit_rounds=20, verbose=
             if verbose:
                 print(f"Stopping early due to no improvement at iteration {env.iteration}")
             raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
-    _callback.order = 10
     return _callback
 
 # --- Final Model Training ---
@@ -662,7 +661,7 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
                 train_df[FEATURES], train_df[TARGET],
                 eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
                 eval_metric=eval_metric,
-                callbacks=[early_stopping_with_overfit(100, 20, verbose=False)],
+                callbacks=[early_stopping_with_overfit(200, 20, verbose=False)],
                 categorical_feature=CATEGORICAL_FEATURES
             )
         else:
