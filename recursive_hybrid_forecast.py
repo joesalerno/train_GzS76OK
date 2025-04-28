@@ -24,7 +24,6 @@ MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
 LAG_WEEKS = [1, 2, 3, 5, 10]
-# Use a single rolling window configuration for clarity
 ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 # Other features (not directly dependent on recursive prediction)
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
@@ -41,7 +40,6 @@ N_SHAP_SAMPLES = 2000
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Load Data ---
 logging.info("Loading data...")
 try:
     df = pd.read_csv(DATA_PATH)
@@ -52,7 +50,6 @@ except FileNotFoundError as e:
     logging.error(f"Error loading data file: {e}. Ensure train.csv, test.csv, meal_info.csv, and fulfilment_center_info.csv are present.")
     raise
 
-# --- Preprocessing ---
 logging.info("Preprocessing data...")
 def preprocess_data(df, meal_info, center_info):
     """Merges dataframes and sorts."""
@@ -68,8 +65,7 @@ test = preprocess_data(test, meal_info, center_info)
 if 'num_orders' not in test.columns:
     test['num_orders'] = np.nan
 
-# --- Feature Engineering ---
-logging.info("Creating features (IMPROVED)...")
+logging.info("Creating features...")
 GROUP_COLS = ["center_id", "meal_id"]
 
 # Add cyclical encoding for weekofyear and month
@@ -112,13 +108,10 @@ def create_other_features(df):
 
 def create_group_aggregates(df):
     df_out = df.copy()
-    # Center-level aggregates
     df_out['center_orders_mean'] = df_out.groupby('center_id', observed=False)['num_orders'].transform('mean')
     df_out['center_orders_std'] = df_out.groupby('center_id', observed=False)['num_orders'].transform('std')
-    # Meal-level aggregates
     df_out['meal_orders_mean'] = df_out.groupby('meal_id', observed=False)['num_orders'].transform('mean')
     df_out['meal_orders_std'] = df_out.groupby('meal_id', observed=False)['num_orders'].transform('std')
-    # Category-level aggregates (if available)
     if 'category' in df_out.columns:
         df_out['category_orders_mean'] = df_out.groupby('category', observed=False)['num_orders'].transform('mean')
         df_out['category_orders_std'] = df_out.groupby('category', observed=False)['num_orders'].transform('std')
@@ -141,7 +134,6 @@ def create_interaction_features(df):
 
 def create_advanced_interactions(df):
     df_out = df.copy()
-    # Define feature groups
     demand_feats = [
         'num_orders_rolling_mean_2', 'num_orders_rolling_mean_5', 'num_orders_rolling_mean_14',
         'meal_orders_mean', 'center_orders_mean'
@@ -187,14 +179,14 @@ def create_advanced_interactions(df):
                     colname = f'{d}_x_{p}_x_{m}'
                     third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m]
     # Optionally, add a time feature (fourth-order) to the above, but only one per interaction
-    # Thoughtful fourth-order examples:
+    # Thoughtful fourth-order interactions
     # 1. demand x price x promo x time (e.g., rolling mean x discount x promo x weekofyear_sin)
     for d in demand_feats:
         for p in price_feats:
             for m in promo_feats:
                 for t in time_feats:
                     if all(f in df_out.columns for f in [d, p, m, t]):
-                        # Only add a couple of the most interpretable fourth-order interactions
+                        # Only add a few of the most interpretable fourth-order interactions
                         if d == 'num_orders_rolling_mean_2' and p == 'discount_pct' and m == 'emailer_for_promotion' and t == 'weekofyear_sin':
                             colname = f'{d}_x_{p}_x_{m}_x_{t}'
                             third_order_dict[colname] = df_out[d] * df_out[p] * df_out[m] * df_out[t]
@@ -269,7 +261,6 @@ def create_advanced_interactions(df):
 # --- Seasonality Smoothing and Outlier Flags ---
 def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_train=True):
     df = df.copy()
-    # Smoothed mean demand by weekofyear/month
     if is_train:
         weekofyear_means = df.groupby('weekofyear')['num_orders'].mean()
         month_means = df.groupby('month')['num_orders'].mean()
@@ -278,7 +269,6 @@ def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_tra
             raise ValueError("When is_train=False, weekofyear_means and month_means must be provided (not None).")
     df['mean_orders_by_weekofyear'] = df['weekofyear'].map(weekofyear_means)
     df['mean_orders_by_month'] = df['month'].map(month_means)
-    # Outlier flags
     df['is_outlier_weekofyear'] = df['weekofyear'].isin([5, 48]).astype(int)
     df['is_outlier_month'] = df['month'].isin([2]).astype(int)
     return df, weekofyear_means, month_means
@@ -411,36 +401,6 @@ features_to_remove = []
 FEATURES = [f for f in FEATURES if f not in features_to_remove]
 logging.info(f"Removed manually identified correlated features. {len(FEATURES)} features remain.")
 
-
-
-# --- Save and plot feature values before training ---
-# feature_values_path = os.path.join(OUTPUT_DIRECTORY, "train_feature_values_before_training.csv")
-# train_df[FEATURES].to_csv(feature_values_path, index=False)
-# logging.info(f"Feature values before training saved to {feature_values_path}")
-
-# # Print a sample to the log
-# logging.info("Sample of feature values before training:\n%s", train_df[FEATURES].head().to_string())
-
-# # Plot feature distributions (histogram for numeric, bar for categorical)
-# import matplotlib.pyplot as plt
-# import seaborn as sns
-
-# for col in FEATURES:
-#     plt.figure(figsize=(6, 3))
-#     if str(train_df[col].dtype) == "category" or train_df[col].nunique() < 20:
-#         # Bar plot for categorical/low-cardinality
-#         train_df[col].value_counts().sort_index().plot(kind="bar")
-#         plt.ylabel("Count")
-#     else:
-#         # Histogram for numeric
-#         sns.histplot(train_df[col].dropna(), kde=False, bins=30)
-#         plt.ylabel("Frequency")
-#     plt.title(f"Distribution of {col}")
-#     plt.tight_layout()
-#     plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"feature_dist_{col}.png"))
-#     plt.close()
-
-
 # --- Train/validation split ---
 max_week = train_df["week"].max()
 valid_df = train_df[train_df["week"] > max_week - VALIDATION_WEEKS].copy()
@@ -453,7 +413,6 @@ for col in CATEGORICAL_FEATURES:
 
 logging.info(f"Train split shape: {train_split_df.shape}, Validation shape: {valid_df.shape}")
 
-# --- RMSLE Metric ---
 def rmsle(y_true, y_pred):
     """Root Mean Squared Logarithmic Error"""
     y_true = np.array(y_true)
@@ -592,7 +551,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     ])
 
 # --- Optuna Feature Selection + Hyperparameter Tuning ---
-logging.info("Starting Optuna feature+hyperparam selection (CV)...")
+logging.info("Starting Optuna feature+hyperparam selection (Cross Validation)...")
 class TqdmOptunaCallback:
     def __init__(self, n_trials):
         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0)
