@@ -567,11 +567,16 @@ logging.info("Starting Optuna feature+hyperparam selection (Cross Validation)...
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 class TqdmOptunaCallback:
-    def __init__(self, n_trials, print_every=1):
+    def __init__(self, n_trials, study=None, print_every=1):
         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
-        self.best_value = float('inf')
-        self.best_trial = None
         self.print_every = print_every
+        # Initialize best_value and best_trial from study if available
+        if study is not None and study.best_trial is not None and study.best_trial.value is not None:
+            self.best_value = study.best_trial.value
+            self.best_trial = study.best_trial.number
+        else:
+            self.best_value = float('inf')
+            self.best_trial = None
     def __call__(self, study, trial):
         self.pbar.update(1)
         msg = None
@@ -588,7 +593,7 @@ class TqdmOptunaCallback:
             self.best_value = trial.value
             self.best_trial = trial.number
             # ANSI green for new best
-            msg = f"\033[92mTrial {trial.number} finished with value: {trial.value:.5f} [NEW BEST]\033[0m | Best: {self.best_value:.5f} | Features: {n_features} | Params: {params_str}"
+            msg = f"\033[92mTrial {trial.number} finished with value: {trial.value:.5f} | BEST: {self.best_value:.5f} \033[0m | Features: {n_features} | Params: {params_str}"
         elif trial.number % self.print_every == 0:
             msg = f"Trial {trial.number} finished with value: {trial.value:.5f} | Best: {self.best_value:.5f} | Features: {n_features} | Params: {params_str}"
         if msg:
@@ -596,9 +601,11 @@ class TqdmOptunaCallback:
     def close(self):
         self.pbar.close()
 
-optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, print_every=1)
+# Create the study first
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
+# Pass the study to the callback so it can initialize best_value/best_trial
+optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
 feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=OPTUNA_NJOBS)
 optuna_callback.close()
 
