@@ -651,10 +651,16 @@ for col in ["category", "cuisine", "center_type", "center_id", "meal_id"]:
 CATEGORICAL_FEATURES = [col for col in ["category", "cuisine", "center_type", "center_id", "meal_id"] if col in FEATURES]
 
 # --- Recursive Prediction and Ensemble Utilities ---
-def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None, month_means=None):
-    history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
-    for week_num in sorted(test_df['week'].unique()):
+def recursive_predict(model, train_df, predict_df, FEATURES, weekofyear_means=None, month_means=None):
+    """
+    Perform recursive prediction for a given predict_df (test or validation set).
+    """
+    # Combine train and predict set, sort by time
+    history_df = pd.concat([train_df, predict_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
+    predict_weeks = sorted(predict_df['week'].unique())
+    for week_num in predict_weeks:
         current_week_mask = history_df['week'] == week_num
+        # Recompute features for all rows (including updated num_orders)
         history_df, _, _ = apply_feature_engineering(
             history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
         ) if weekofyear_means is not None and month_means is not None else apply_feature_engineering(history_df, is_train=False)
@@ -663,7 +669,7 @@ def recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means=None,
             current_features[col] = 0
         current_preds = np.clip(model.predict(current_features[FEATURES]), 0, None).round().astype(float)
         history_df.loc[current_week_mask, 'num_orders'] = current_preds
-    final_predictions = history_df.loc[history_df['id'].isin(test_df['id']), ['id', 'num_orders']].copy()
+    final_predictions = history_df.loc[history_df['id'].isin(predict_df['id']), ['id', 'num_orders']].copy()
     final_predictions['num_orders'] = final_predictions['num_orders'].round().astype(int)
     final_predictions['id'] = final_predictions['id'].astype(int)
     return final_predictions.set_index('id')['num_orders']
@@ -745,182 +751,26 @@ try:
 except Exception as e:
     logging.error(f"Error during SHAP analysis for ensemble: {e}")
 
-# --- Validation Plot (using first ensemble model) ---
-logging.info("Generating validation plot (using first ensemble model)...")
+# --- Validation Plot (using recursive predictions) ---
+logging.info("Generating validation plot (using recursive predictions)...")
 try:
-    valid_preds = ensemble_models[0].predict(valid_df[FEATURES])
-    valid_preds = np.clip(valid_preds, 0, None)
+    valid_preds_recursive = recursive_predict(
+        ensemble_models[0], train_split_df, valid_df, FEATURES, weekofyear_means, month_means
+    )
+    valid_rmsle_recursive = rmsle(valid_df[TARGET].values, valid_preds_recursive.loc[valid_df['id']].values)
     plt.figure(figsize=(15, 6))
-    plt.scatter(valid_df[TARGET], valid_preds, alpha=0.5, s=10)
+    plt.scatter(valid_df[TARGET], valid_preds_recursive.loc[valid_df['id']], alpha=0.5, s=10)
     plt.plot([valid_df[TARGET].min(), valid_df[TARGET].max()], [valid_df[TARGET].min(), valid_df[TARGET].max()], 'r--', lw=2, label='Ideal')
     plt.xlabel("Actual Orders (Validation Set)")
     plt.ylabel("Predicted Orders (Validation Set)")
-    plt.title(f"Actual vs. Predicted Orders (Validation Set) - RMSLE: {rmsle(valid_df[TARGET], valid_preds):.4f}")
+    plt.title(f"Actual vs. Predicted Orders (Validation Set, Recursive) - RMSLE: {valid_rmsle_recursive:.4f}")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted_ensemble.png"))
+    plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted_ensemble_recursive.png"))
     plt.close()
-    logging.info("Validation plot saved.")
+    logging.info("Validation plot (recursive) saved.")
 except Exception as e:
-    logging.error(f"Error during plotting: {e}")
-
-# --- End of Script ---
-logging.info("All tasks completed.")
-
-# --- Two-Stage Recursive Prediction Utilities ---
-# Identify main dependent features to predict recursively
-DEPENDENT_FEATURES = [
-    f"num_orders_lag_{lag}" for lag in LAG_WEEKS
-] + [
-    f"num_orders_rolling_mean_{w}" for w in ROLLING_WINDOWS
-] + [
-    f"num_orders_rolling_std_{w}" for w in ROLLING_WINDOWS
-] + [
-    'center_orders_mean', 'center_orders_std',
-    'meal_orders_mean', 'meal_orders_std',
-    'category_orders_mean', 'category_orders_std'
-]
-DEPENDENT_FEATURES = [f for f in DEPENDENT_FEATURES if f in train_df.columns]
-
-# Train a model for each dependent feature
-feature_models = {}
-for feat in DEPENDENT_FEATURES:
-    # Use the same features as for num_orders, but remove the target and the feature itself
-    feat_features = [f for f in FEATURES if f != feat and f != TARGET]
-    params = final_params.copy()
-    params.pop('seed', None)
-    model = LGBMRegressor(**params, seed=SEED+hash(feat)%1000)
-    model.fit(train_df[feat_features], train_df[feat])
-    feature_models[feat] = (model, feat_features)
-
-# Update recursive_predict to use feature models
-
-def recursive_predict_two_stage(model, train_df, test_df, FEATURES, feature_models, weekofyear_means=None, month_means=None):
-    history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
-    for week_num in sorted(test_df['week'].unique()):
-        current_week_mask = history_df['week'] == week_num
-        # Predict dependent features first
-        for feat, (feat_model, feat_features) in feature_models.items():
-            feat_input = history_df.loc[current_week_mask, feat_features]
-            # Fill missing columns if any
-            for col in feat_features:
-                if col not in feat_input.columns:
-                    feat_input[col] = 0
-            feat_input = feat_input[feat_features]
-            pred = feat_model.predict(feat_input)
-            history_df.loc[current_week_mask, feat] = pred
-        # Recompute advanced features if needed
-        history_df, _, _ = apply_feature_engineering(
-            history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
-        ) if weekofyear_means is not None and month_means is not None else apply_feature_engineering(history_df, is_train=False)
-        current_features = history_df.loc[current_week_mask, FEATURES]
-        for col in [col for col in FEATURES if col not in current_features.columns]:
-            current_features[col] = 0
-        current_preds = np.clip(model.predict(current_features[FEATURES]), 0, None).round().astype(float)
-        history_df.loc[current_week_mask, 'num_orders'] = current_preds
-    final_predictions = history_df.loc[history_df['id'].isin(test_df['id']), ['id', 'num_orders']].copy()
-    final_predictions['num_orders'] = final_predictions['num_orders'].round().astype(int)
-    final_predictions['id'] = final_predictions['id'].astype(int)
-    return final_predictions.set_index('id')['num_orders']
-
-# --- Recursive Ensemble Prediction with Two-Stage Feature Prediction ---
-def recursive_ensemble_two_stage(train_df, test_df, FEATURES, feature_models, weekofyear_means=None, month_means=None, n_models=5, eval_metric=None):
-    preds_list = []
-    models = []
-    for i in tqdm(range(n_models), desc="Ensemble Models (2-stage)", position=0):
-        logging.info(f"Training two-stage ensemble model {i+1}/{n_models}...")
-        params = final_params.copy(); params.pop('seed', None)
-        model = LGBMRegressor(**params, seed=SEED+i)
-        if eval_metric:
-            model.fit(
-                train_df[FEATURES], train_df[TARGET],
-                eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
-                eval_metric=eval_metric,
-                callbacks=[early_stopping_with_overfit(300, 20, verbose=False)],
-                categorical_feature=CATEGORICAL_FEATURES
-            )
-        else:
-            model.fit(train_df[FEATURES], train_df[TARGET], categorical_feature=CATEGORICAL_FEATURES)
-        preds_list.append(recursive_predict_two_stage(model, train_df, test_df, FEATURES, feature_models, weekofyear_means, month_means).values)
-        models.append(model)
-    return np.mean(preds_list, axis=0).round().astype(int), models
-
-# --- Run and save two-stage recursive ensemble prediction ---
-logging.info("Running two-stage recursive ensemble prediction with dependent feature models...")
-ensemble_preds_2stage, ensemble_models_2stage = recursive_ensemble_two_stage(train_df, test_df, FEATURES, feature_models, weekofyear_means, month_means, n_models=5, eval_metric=lgb_rmsle)
-final_predictions_df_2stage = pd.DataFrame({'id': test_df['id'].astype(int), 'num_orders': ensemble_preds_2stage})
-submission_path_ensemble_2stage = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble_2stage.csv")
-final_predictions_df_2stage.to_csv(submission_path_ensemble_2stage, index=False)
-logging.info(f"Two-stage ensemble submission file saved to {submission_path_ensemble_2stage}")
-
-# --- SHAP Analysis for Two-Stage Ensemble (using first model as representative) ---
-logging.info("Calculating SHAP values for two-stage ensemble (using first model)...")
-try:
-    if len(train_df) > N_SHAP_SAMPLES:
-        shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
-    else:
-        shap_sample = train_df.copy()
-    explainer = shap.TreeExplainer(ensemble_models_2stage[0])
-    shap_values = explainer.shap_values(shap_sample[FEATURES])
-    shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
-    shap_values_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_2stage_values.csv"), index=False)
-    np.save(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_2stage_values.npy"), shap_values)
-    shap_importance_df = pd.DataFrame({
-        'feature': FEATURES,
-        'mean_abs_shap': np.abs(shap_values).mean(axis=0)
-    }).sort_values('mean_abs_shap', ascending=False)
-    shap_importance_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_2stage_feature_importances.csv"), index=False)
-    plt.figure()
-    shap.summary_plot(shap_values, shap_sample[FEATURES], show=False, max_display=len(FEATURES))
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_2stage_summary_all_features.png"))
-    plt.close()
-    plt.figure(figsize=(10, 8))
-    shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
-    plt.gca().invert_yaxis()
-    plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
-    plt.title('Top 20 SHAP Feature Importances (Two-Stage Ensemble)')
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_2stage_top20_importance.png"))
-    plt.close()
-    for feat in shap_importance_df['feature']:
-        shap.dependence_plot(feat, shap_values, shap_sample[FEATURES], show=False)
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_2stage_dependence_{feat}.png"))
-        plt.close()
-    try:
-        shap_interaction_values = explainer.shap_interaction_values(shap_sample[FEATURES])
-        plt.figure()
-        shap.summary_plot(shap_interaction_values, shap_sample[FEATURES], show=False, max_display=20)
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_2stage_interaction_summary.png"))
-        plt.close()
-    except Exception as e:
-        logging.warning(f"Could not generate SHAP interaction summary plot: {e}")
-    logging.info("SHAP analysis saved for two-stage ensemble.")
-except Exception as e:
-    logging.error(f"Error during SHAP analysis for two-stage ensemble: {e}")
-
-# --- Validation Plot (using first two-stage ensemble model) ---
-logging.info("Generating validation plot (using first two-stage ensemble model)...")
-try:
-    valid_preds_2stage = ensemble_models_2stage[0].predict(valid_df[FEATURES])
-    valid_preds_2stage = np.clip(valid_preds_2stage, 0, None)
-    plt.figure(figsize=(15, 6))
-    plt.scatter(valid_df[TARGET], valid_preds_2stage, alpha=0.5, s=10)
-    plt.plot([valid_df[TARGET].min(), valid_df[TARGET].max()], [valid_df[TARGET].min(), valid_df[TARGET].max()], 'r--', lw=2, label='Ideal')
-    plt.xlabel("Actual Orders (Validation Set)")
-    plt.ylabel("Predicted Orders (Validation Set)")
-    plt.title(f"Actual vs. Predicted Orders (Validation Set) - RMSLE: {rmsle(valid_df[TARGET], valid_preds_2stage):.4f}")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted_ensemble_2stage.png"))
-    plt.close()
-    logging.info("Validation plot saved.")
-except Exception as e:
-    logging.error(f"Error during plotting: {e}")
-
+    logging.error(f"Error during plotting (recursive): {e}")
 # --- End of Script ---
 logging.info("All tasks completed.")
