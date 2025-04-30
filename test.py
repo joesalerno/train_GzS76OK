@@ -155,7 +155,7 @@ def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_tra
     df['mean_orders_by_month'] = df['month'].map(month_means)
     return df, weekofyear_means, month_means
 
-def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], windows=[3, 5]):
+def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], windows=[3, 5, 10]):
     df_out = df.copy()
     group = df_out.groupby(GROUP_COLS, observed=False)
     for col in binary_cols:
@@ -171,7 +171,7 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     if is_train or 'num_orders' in df_out.columns:
         df_out = create_lag_rolling_features(df_out)
     df_out = create_other_features(df_out)
-    df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], [3, 5])
+    df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], [3, 5, 10])
     df_out = create_group_aggregates(df_out)
     df_out = create_selected_interaction_features(df_out)
     df_out = add_promo_recency_features(df_out)
@@ -244,7 +244,7 @@ for w in [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]:
 
 # Add rolling means for binary features
 for col in ["emailer_for_promotion", "homepage_featured"]:
-    for w in [3, 5]:
+    for w in [3, 5, 10]:
         mean_col = f"{col}_rolling_mean_{w}"
         if mean_col in train_df.columns and mean_col not in features_set:
             FEATURES.append(mean_col)
