@@ -1018,13 +1018,16 @@ class TqdmOptunaCallback:
                 return f"{val:.6f}"
             return str(val)
         params_str = ', '.join(f"{k}={fmt_val(v)}" for k, v in list(main_params.items())[:5])
+        # Handle None trial.value gracefully
         if trial.value is not None and trial.value < self.best_value:
             self.best_value = trial.value
             self.best_trial = trial.number
             # ANSI green for new best
             msg = f"\033[92mTrial {trial.number} finished with value: {trial.value:.5f} | BEST! {self.best_value:.5f}\033[0m | Features: {n_features} | Params: {params_str}"
         elif trial.number % self.print_every == 0:
-            msg = f"Trial {trial.number} finished with value: {trial.value:.5f} | Best: {self.best_value:.5f} | Features: {n_features} | Params: {params_str}"
+            val_str = f"{trial.value:.5f}" if trial.value is not None else "None"
+            best_str = f"{self.best_value:.5f}" if self.best_value is not None else "None"
+            msg = f"Trial {trial.number} finished with value: {val_str} | Best: {best_str} | Features: {n_features} | Params: {params_str}"
         if msg:
             tqdm.write(msg)
     def close(self):
