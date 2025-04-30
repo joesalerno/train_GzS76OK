@@ -980,7 +980,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
         score = (rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred))
         if (score is None or np.isnan(score) or np.isinf(score)):
-            return float(10000000)
+            return float('inf')
+        scores.append(score)
     return np.mean(scores)
 
 logging.info("Starting Optuna feature+hyperparam selection...")
