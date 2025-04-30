@@ -536,10 +536,10 @@ def multi_seed_overfitting_patience_analysis(train_df, valid_df, FEATURES, TARGE
     return patience_results
 
 # --- Call multi-seed overfitting patience analysis after all dependencies are defined ---
-try:
-    multi_seed_overfitting_patience_analysis(train_split_df, valid_df, FEATURES, TARGET, final_params)
-except Exception as e:
-    logging.warning(f"Could not run multi-seed overfitting patience analysis: {e}")
+# try:
+#     multi_seed_overfitting_patience_analysis(train_split_df, valid_df, FEATURES, TARGET, final_params)
+# except Exception as e:
+#     logging.warning(f"Could not run multi-seed overfitting patience analysis: {e}")
 
 
 
@@ -865,6 +865,8 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
     - (center_id, meal_id) composite
     Prints mean/std RMSLE for each and recommends the best.
     """
+    # Ensure positional indices for iloc
+    train_df = train_df.reset_index(drop=True)
     from collections import OrderedDict
     groupings = OrderedDict({
         'meal_id': train_df['meal_id'],
@@ -879,9 +881,11 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
         for fold, (train_idx, val_idx) in enumerate(gtscv.split(train_df, groups=groups)):
             if fold >= max_folds:
                 break
+            model_params = dict(params or final_params)
+            # model_params.pop('n_estimators', None)
             X_tr, X_val = train_df.iloc[train_idx][FEATURES], train_df.iloc[val_idx][FEATURES]
             y_tr, y_val = train_df.iloc[train_idx][TARGET], train_df.iloc[val_idx][TARGET]
-            model = LGBMRegressor(**(params or final_params), n_estimators=300, random_state=SEED)
+            model = LGBMRegressor(**model_params, random_state=SEED)
             model.fit(X_tr, y_tr)
             y_pred = model.predict(X_val)
             score = rmsle(y_val, y_pred)
@@ -968,7 +972,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
             LGBMRegressor(**params).fit(
                 train_split_df.iloc[train_idx][selected_features],
                 train_split_df.iloc[train_idx][TARGET],
-                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
+                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_split_df][TARGET]),
                           (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
                 eval_metric=lgb_rmsle,
                 callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
