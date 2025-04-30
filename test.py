@@ -872,7 +872,7 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
     groupings = OrderedDict({
         'meal_id': train_df['meal_id'],
         'center_id': train_df['center_id'],
-        'center_meal': list(zip(train_df['center_id'], train_df['meal_id'])),
+        'center_meal': train_df['center_id'].astype(str) + '_' + train_df['meal_id'].astype(str),
     })
     results = {}
     for name, groups in groupings.items():
