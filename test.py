@@ -992,9 +992,17 @@ class TqdmOptunaCallback:
         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
         self.print_every = print_every
         # Initialize best_value and best_trial from study if available
-        if study is not None and study.best_trial is not None and study.best_trial.value is not None:
-            self.best_value = study.best_trial.value
-            self.best_trial = study.best_trial.number
+        if study is not None:
+            try:
+                if study.best_trial is not None and study.best_trial.value is not None:
+                    self.best_value = study.best_trial.value
+                    self.best_trial = study.best_trial.number
+                else:
+                    self.best_value = float('inf')
+                    self.best_trial = None
+            except Exception:
+                self.best_value = float('inf')
+                self.best_trial = None
         else:
             self.best_value = float('inf')
             self.best_trial = None
