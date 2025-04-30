@@ -905,20 +905,28 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
 # --- Feature Selection and Hyperparameter Tuning with Optuna ---
 def optuna_feature_selection_and_hyperparam_objective(trial):
     # Hyperparameter search space
+    boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
+    # Only set bagging params if not using GOSS
+    if boosting_type != 'goss':
+        bagging_fraction = trial.suggest_float('bagging_fraction', 0.6, 1.0)
+        bagging_freq = trial.suggest_int('bagging_freq', 1, 7)
+    else:
+        bagging_fraction = 1.0
+        bagging_freq = 0
     params = {
         'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.1, log=True),
         'num_leaves': trial.suggest_int('num_leaves', 10, 64),
         'max_depth': trial.suggest_int('max_depth', 3, 8),
         'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
-        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.7, 1.0),
-        'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
+        'bagging_fraction': bagging_fraction,
+        'bagging_freq': bagging_freq,
         'min_child_samples': trial.suggest_int('min_child_samples', 20, 200),
         'lambda_l1': trial.suggest_float('lambda_l1', 0.1, 10.0, log=True),
         'lambda_l2': trial.suggest_float('lambda_l2', 0.1, 10.0, log=True),
         'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 200),
         'subsample_for_bin': trial.suggest_int('subsample_for_bin', 20000, 300000),
-        'boosting_type': trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss']),
+        'boosting_type': boosting_type,
         'max_bin': trial.suggest_int('max_bin', 128, 512),
         'objective': 'regression_l1',
         'n_estimators': 500,
@@ -927,13 +935,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'verbose': -1,
         'metric': 'rmsle',
     }
-    # Only set bagging params if not using GOSS
-    if params['boosting_type'] != 'goss':
-        params['bagging_fraction'] = trial.suggest_float('bagging_fraction', 0.6, 1.0)
-        params['bagging_freq'] = trial.suggest_int('bagging_freq', 1, 7)
-    else:
-        params['bagging_fraction'] = 1.0
-        params['bagging_freq'] = 0
     # Find all features with sin/cos in their name (excluding those already in a pair)
     sincos_features = [f for f in FEATURES if re.search(r'(_sin|_cos)', f)]
     # Group into pairs by prefix (e.g. 'num_orders_rolling_mean_2_x_weekofyear')
