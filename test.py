@@ -11,15 +11,14 @@ import pandas as pd
 import numpy as np
 from lightgbm import LGBMRegressor
 import lightgbm as lgb  # Added for early stopping callback
-from sklearn.model_selection import TimeSeriesSplit
 import optuna
 import shap
 from tqdm import tqdm
 import logging
 import csv
 import random
+from optuna.integration import LightGBMPruningCallback
 
-# --- Configuration ---
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
@@ -29,17 +28,14 @@ LAG_WEEKS = [1, 2, 3, 5, 10]
 ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 N_ENSEMBLE_MODELS = 1
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
-# Other features (not directly dependent on recursive prediction)
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 10000 # Number of Optuna trials (increased for better search)
-OPTUNA_NJOBS = 1  # Use sequential Optuna trials for best resource usage with LGBM
+OPTUNA_TRIALS = 5 # Number of Optuna trials (increased for better search)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
 N_SHAP_SAMPLES = 2000
 
-# --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 logging.info("Loading data...")
@@ -70,7 +66,6 @@ if 'num_orders' not in test.columns:
 logging.info("Creating features...")
 GROUP_COLS = ["center_id", "meal_id"]
 
-# Add cyclical encoding for weekofyear and month
 from math import pi
 def create_temporal_features(df):
     df_out = df.copy()
@@ -81,9 +76,6 @@ def create_temporal_features(df):
         df_out["month"] = ((df_out["week"] - 1) // 4) % 12 + 1
     df_out["month_sin"] = np.sin(2 * pi * df_out["month"] / 12)
     df_out["month_cos"] = np.cos(2 * pi * df_out["month"] / 12)
-    # Example holiday weeks (customize as needed)
-    holiday_weeks = set([1, 10, 25, 45, 52])
-    df_out["is_holiday_week"] = df_out["weekofyear"].isin(holiday_weeks).astype(int)
     return df_out
 
 def create_lag_rolling_features(df, target_col='num_orders', lag_weeks=LAG_WEEKS, rolling_windows=ROLLING_WINDOWS):
@@ -103,9 +95,6 @@ def create_other_features(df):
     df_out["discount"] = df_out["base_price"] - df_out["checkout_price"]
     df_out["discount_pct"] = df_out["discount"] / df_out["base_price"].replace(0, np.nan)
     df_out["price_diff"] = group["checkout_price"].diff()
-    # for col in OTHER_ROLLING_SUM_COLS:
-    #     shifted = group[col].shift(1)
-    #     df_out[f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}"] = shifted.rolling(OTHER_ROLLING_SUM_WINDOW, min_periods=1).sum().reset_index(drop=True)
     return df_out
 
 def create_group_aggregates(df):
@@ -119,9 +108,8 @@ def create_group_aggregates(df):
         df_out['category_orders_std'] = df_out.groupby('category', observed=False)['num_orders'].transform('std')
     return df_out
 
-def create_polynomial_and_interaction_features(df):
+def create_selected_interaction_features(df):
     df_out = df.copy()
-    # --- Selected interaction features ---
     if 'price_diff' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
         df_out['price_diff_x_emailer'] = df_out['price_diff'] * df_out['emailer_for_promotion']
     if 'price_diff' in df_out.columns and 'homepage_featured' in df_out.columns:
@@ -136,7 +124,6 @@ def create_polynomial_and_interaction_features(df):
         df_out['meal_orders_mean_x_emailer_for_promotion'] = df_out['meal_orders_mean'] * df_out['emailer_for_promotion']
     return df_out
 
-# --- Promotion Recency Features ---
 def add_promo_recency_features(df):
     df_out = df.copy()
     group_cols = [col for col in ["center_id", "meal_id"] if col in df_out.columns]
@@ -153,26 +140,6 @@ def add_promo_recency_features(df):
             df_out[name] = df_out.groupby(group_cols, observed=False)[promo_col].transform(weeks_since_last)
     return df_out
 
-# Removed create_interaction_features and create_advanced_interactions (no interaction features)
-# df_out = df.copy()
-# demand_feats = [
-#     'num_orders_rolling_mean_2', 'num_orders_rolling_mean_5', 'num_orders_rolling_mean_14',
-#     'meal_orders_mean', 'center_orders_mean'
-# ]
-# price_feats = ['checkout_price', 'price_diff', 'discount_pct']
-# promo_feats = ['emailer_for_promotion', 'homepage_featured']
-# time_feats = ['weekofyear_sin', 'weekofyear_cos', 'month_sin', 'month_cos', 'mean_orders_by_weekofyear', 'mean_orders_by_month']    # Polynomial features (squared, cubic) -- skip *_sin and *_cos and binary promo_feats
-# top_feats = demand_feats + price_feats + promo_feats + time_feats
-# for feat in top_feats:
-#     if feat in df_out.columns:
-#         if feat.endswith('_sin') or feat.endswith('_cos') or feat in ['emailer_for_promotion', 'homepage_featured']:
-#             continue  # Do not create *_sin_sq, *_cos_sq, or *_sq/_cube for binary promo_feats
-#         df_out[f'{feat}_sq'] = df_out[feat] ** 2
-#         df_out[f'{feat}_cube'] = df_out[feat] ** 3
-# # Removed all interaction feature creation
-# return df_out
-
-# --- Seasonality Smoothing ---
 def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_train=True):
     df = df.copy()
     if is_train:
@@ -203,9 +170,8 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     df_out = create_other_features(df_out)
     df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], [3, 5])
     df_out = create_group_aggregates(df_out)
-    df_out = create_polynomial_and_interaction_features(df_out)
+    df_out = create_selected_interaction_features(df_out)
     df_out = add_promo_recency_features(df_out)
-    # Add smoothed seasonality and outlier flags
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
     lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
@@ -222,8 +188,7 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     df_out = df_out.loc[:, ~df_out.columns.duplicated()]
     return df_out, weekofyear_means, month_means
 
-# --- One-hot encoding and feature engineering for train/test ---
-logging.info("Applying feature engineering (no one-hot for native categoricals)...")
+logging.info("Applying feature engineering...")
 df_full = pd.concat([df, test], ignore_index=True)
 df_full = create_other_features(df_full)
 for prefix in ["category_", "cuisine_", "center_type_"]:
@@ -352,6 +317,22 @@ def rmsle(y_true, y_pred):
 def lgb_rmsle(y_true, y_pred):
     """RMSLE metric for LightGBM"""
     return 'rmsle', rmsle(y_true, y_pred), False # lower is better
+
+# # --- Custom LightGBM RMSLE metric for Optuna integration ---
+# def rmsle_lgbm(y_pred, dataset):
+#     """Custom RMSLE metric for LightGBM (Optuna callback compatible)"""
+#     y_true = dataset.get_label()
+#     y_pred = np.clip(y_pred, 0, None)
+#     rmsle_score = np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
+#     return 'rmsle', rmsle_score, False
+
+# --- Custom LightGBM RMSLE metric for sklearn API (LGBMRegressor) ---
+def rmsle_lgbm(y_true, y_pred):
+    """Custom RMSLE metric for LightGBM sklearn API (Optuna callback compatible)"""
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred).clip(0)
+    rmsle_score = np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
+    return 'rmsle', rmsle_score, False
 
 # --- Custom Early Stopping Callback with Overfitting Detection ---
 def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
@@ -865,7 +846,6 @@ class GroupTimeSeriesSplit:
 
 
 
-
 # --- Empirical GroupTimeSeriesSplit Grouping Strategy Test ---
 def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits=3, max_folds=3):
     """
@@ -927,16 +907,16 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     # Hyperparameter search space
     params = {
         'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.1, log=True),
-        'num_leaves': trial.suggest_int('num_leaves', 10, 128),
-        'max_depth': trial.suggest_int('max_depth', 3, 12),
+        'num_leaves': trial.suggest_int('num_leaves', 10, 64),
+        'max_depth': trial.suggest_int('max_depth', 3, 8),
         'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
-        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.7, 1.0),
         'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
-        'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
-        'lambda_l1': trial.suggest_float('lambda_l1', 1e-3, 10.0, log=True),
-        'lambda_l2': trial.suggest_float('lambda_l2', 1e-3, 10.0, log=True),
+        'min_child_samples': trial.suggest_int('min_child_samples', 20, 200),
+        'lambda_l1': trial.suggest_float('lambda_l1', 0.1, 10.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 0.1, 10.0, log=True),
         'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
-        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 100),
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 200),
         'subsample_for_bin': trial.suggest_int('subsample_for_bin', 20000, 300000),
         'boosting_type': trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss']),
         'max_bin': trial.suggest_int('max_bin', 128, 512),
@@ -945,7 +925,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
-        'metric': 'None',
+        'metric': 'rmsle',
     }
     # Only set bagging params if not using GOSS
     if params['boosting_type'] != 'goss':
@@ -977,23 +957,26 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         return float('inf')
     gtscv = GroupTimeSeriesSplit(n_splits=3)
     groups = train_split_df["center_id"]
-    return np.mean([
-        rmsle(
-            train_split_df.iloc[valid_idx][TARGET],
-            LGBMRegressor(**params).fit(
+    for train_idx, valid_idx in gtscv.split(train_split_df, groups=groups):
+        model = LGBMRegressor(**params)
+        model.fit(
                 train_split_df.iloc[train_idx][selected_features],
                 train_split_df.iloc[train_idx][TARGET],
-                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
-                          (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
-                eval_metric=lgb_rmsle,
-                callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)]
-            ).predict(train_split_df.iloc[valid_idx][selected_features])
+                eval_set=[
+                    (train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
+                    (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
+                ],
+                eval_metric=rmsle_lgbm,
+                callbacks=[
+                    LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
+                    early_stopping_with_overfit(100, 20, verbose=False)
+                ]
         )
-        for train_idx, valid_idx in gtscv.split(train_split_df, groups=groups)
-    ])
+        y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
+        score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred)
+        return score
 
-# --- Optuna Feature Selection + Hyperparameter Tuning ---
-logging.info("Starting Optuna feature+hyperparam selection (Cross Validation)...")
+logging.info("Starting Optuna feature+hyperparam selection...")
 # Reduce Optuna logging verbosity
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -1045,7 +1028,7 @@ optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
 # Pass the study to the callback so it can initialize best_value/best_trial
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
-feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=OPTUNA_NJOBS)
+feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=1)
 optuna_callback.close()
 
 # Extract best features and params
@@ -1171,7 +1154,6 @@ try:
     shap_importance_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_feature_importances.csv"), index=False)
     plt.figure()
     shap.summary_plot(shap_values, shap_sample[FEATURES], show=False, max_display=len(FEATURES))
-    # plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_summary_all_features.png"))
     plt.close()
     plt.figure(figsize=(10, 8))
@@ -1179,19 +1161,16 @@ try:
     plt.gca().invert_yaxis()
     plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
     plt.title('Top 20 SHAP Feature Importances (Ensemble)')
-    # plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_top20_importance.png"))
     plt.close()
     for feat in shap_importance_df['feature']:
         shap.dependence_plot(feat, shap_values, shap_sample[FEATURES], show=False)
-        # plt.tight_layout()
         plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_dependence_{feat}.png"))
         plt.close()
     try:
         shap_interaction_values = explainer.shap_interaction_values(shap_sample[FEATURES])
         plt.figure()
         shap.summary_plot(shap_interaction_values, shap_sample[FEATURES], show=False, max_display=20)
-        # plt.tight_layout()
         plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_interaction_summary.png"))
         plt.close()
     except Exception as e:
@@ -1215,12 +1194,10 @@ try:
     plt.title(f"Actual vs. Predicted Orders (Validation Set, Recursive) - RMSLE: {valid_rmsle_recursive:.4f}")
     plt.legend()
     plt.grid(True)
-    # plt.tight_layout()
     plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted_ensemble_recursive.png"))
     plt.close()
     logging.info("Validation plot (recursive) saved.")
 except Exception as e:
     logging.error(f"Error during plotting (recursive): {e}")
 
-# --- End of Script ---
 logging.info("All tasks completed.")
