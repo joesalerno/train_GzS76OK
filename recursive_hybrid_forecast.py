@@ -612,6 +612,9 @@ optuna_callback.close()
 best_mask = [feature_hyperparam_study.best_trial.params.get(f, False) for f in FEATURES]
 SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
 best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
+if best_params['boosting_type'] == 'goss':
+    best_params['bagging_fraction'] = 1.0
+    best_params['bagging_freq'] = 0
 selected_pairs = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k.endswith('_pair')}
 logging.info(f"Optuna-selected features ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
 
