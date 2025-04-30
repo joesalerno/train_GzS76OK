@@ -883,6 +883,8 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
                 break
             model_params = dict(params or final_params)
             # model_params.pop('n_estimators', None)
+            train_idx = np.array(train_idx).flatten()
+            val_idx = np.array(val_idx).flatten()
             X_tr, X_val = train_df.iloc[train_idx][FEATURES], train_df.iloc[val_idx][FEATURES]
             y_tr, y_val = train_df.iloc[train_idx][TARGET], train_df.iloc[val_idx][TARGET]
             model = LGBMRegressor(**model_params, random_state=SEED)
