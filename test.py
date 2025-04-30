@@ -1041,34 +1041,34 @@ optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_stu
 feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=1)
 optuna_callback.close()
 
-# Extract best features and params
-best_mask = [feature_hyperparam_study.best_trial.params.get(f, False) for f in FEATURES]
-SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
-best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
-if best_params['boosting_type'] == 'goss':
-    best_params['bagging_fraction'] = 1.0
-    best_params['bagging_freq'] = 0
-selected_pairs = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k.endswith('_pair')}
 
-# Add both features from each selected cyclical pair
-for pair_name, is_selected in selected_pairs.items():
-    if is_selected:
-        # Remove '_pair' and split to get the two feature names
-        pair_feats = pair_name[:-5].split('_')
-        # Find the split point between the two features (look for the second feature's suffix)
-        # This assumes the format is always ..._sin_..._cos_pair or similar
-        for i in range(1, len(pair_feats)):
-            if pair_feats[i].endswith('sin') or pair_feats[i].endswith('cos'):
-                feat1 = '_'.join(pair_feats[:i+1])
-                feat2 = '_'.join(pair_feats[i+1:])
-                # Add both features if they exist in train_df and not already in SELECTED_FEATURES
-                for feat in [feat1, feat2]:
-                    if feat and feat in train_df.columns and feat not in SELECTED_FEATURES:
-                        SELECTED_FEATURES.append(feat)
-                break
-
-logging.info(f"Optuna-selected params: {best_params}")
-logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
+# Extract best features and params, but handle missing best_trial gracefully
+if feature_hyperparam_study.best_trial is None:
+    logging.warning("No completed Optuna trial found. Skipping feature/param extraction.")
+    SELECTED_FEATURES = FEATURES.copy()
+    best_params = final_params.copy()
+else:
+    best_mask = [feature_hyperparam_study.best_trial.params.get(f, False) for f in FEATURES]
+    SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
+    best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
+    if best_params.get('boosting_type') == 'goss':
+        best_params['bagging_fraction'] = 1.0
+        best_params['bagging_freq'] = 0
+    selected_pairs = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k.endswith('_pair')}
+    # Add both features from each selected cyclical pair
+    for pair_name, is_selected in selected_pairs.items():
+        if is_selected:
+            pair_feats = pair_name[:-5].split('_')
+            for i in range(1, len(pair_feats)):
+                if pair_feats[i].endswith('sin') or pair_feats[i].endswith('cos'):
+                    feat1 = '_'.join(pair_feats[:i+1])
+                    feat2 = '_'.join(pair_feats[i+1:])
+                    for feat in [feat1, feat2]:
+                        if feat and feat in train_df.columns and feat not in SELECTED_FEATURES:
+                            SELECTED_FEATURES.append(feat)
+                    break
+    logging.info(f"Optuna-selected params: {best_params}")
+    logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
 
 # Use SELECTED_FEATURES for final model and ensemble
 FEATURES = SELECTED_FEATURES
