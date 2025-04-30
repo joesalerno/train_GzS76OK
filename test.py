@@ -19,6 +19,9 @@ import csv
 import random
 from optuna.integration import LightGBMPruningCallback
 
+# import warnings
+# warnings.filterwarnings("ignore", message="The reported value is ignored because this `step` .* is already reported.")
+
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
@@ -26,10 +29,10 @@ CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
 LAG_WEEKS = [1, 2, 3, 5, 10]
 ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
-N_ENSEMBLE_MODELS = 1
+N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 10000 # Number of Optuna trials (increased for better search)
+OPTUNA_TRIALS = 1 # Number of Optuna trials (increased for better search)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -958,6 +961,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         return float('inf')
     gtscv = GroupTimeSeriesSplit(n_splits=3)
     groups = train_split_df["center_id"]
+    scores = []
     for train_idx, valid_idx in gtscv.split(train_split_df, groups=groups):
         model = LGBMRegressor(**params)
         model.fit(
@@ -974,8 +978,10 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
                 ]
         )
         y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
-        score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred)
-        return score
+        score = (rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred))
+        if (score is None or np.isnan(score) or np.isinf(score)):
+            return float('inf')
+    return np.mean(scores)
 
 logging.info("Starting Optuna feature+hyperparam selection...")
 # Reduce Optuna logging verbosity
