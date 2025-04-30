@@ -911,26 +911,26 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
     # Only set bagging params if not using GOSS
     if boosting_type != 'goss':
-        bagging_fraction = trial.suggest_float('bagging_fraction', 0.6, 1.0)
+        bagging_fraction = trial.suggest_float('bagging_fraction', 0.8, 1.0)  # ↑ Min value for more regularization
         bagging_freq = trial.suggest_int('bagging_freq', 1, 7)
     else:
         bagging_fraction = 1.0
         bagging_freq = 0
     params = {
-        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.1, log=True),
-        'num_leaves': trial.suggest_int('num_leaves', 10, 64),
-        'max_depth': trial.suggest_int('max_depth', 3, 8),
-        'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.05, log=True),  # Lower for less overfit
+        'num_leaves': trial.suggest_int('num_leaves', 8, 32),  # Lower for less complexity
+        'max_depth': trial.suggest_int('max_depth', 3, 6),     # Lower for less complexity
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.7, 1.0),  # ↑ Min value
         'bagging_fraction': bagging_fraction,
         'bagging_freq': bagging_freq,
-        'min_child_samples': trial.suggest_int('min_child_samples', 20, 200),
-        'lambda_l1': trial.suggest_float('lambda_l1', 0.1, 10.0, log=True),
-        'lambda_l2': trial.suggest_float('lambda_l2', 0.1, 10.0, log=True),
+        'min_child_samples': trial.suggest_int('min_child_samples', 50, 300),  # ↑ Min value
+        'lambda_l1': trial.suggest_float('lambda_l1', 1.0, 20.0, log=True),    # ↑ Min value
+        'lambda_l2': trial.suggest_float('lambda_l2', 1.0, 20.0, log=True),    # ↑ Min value
         'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
-        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 20, 200),
-        'subsample_for_bin': trial.suggest_int('subsample_for_bin', 20000, 300000),
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 50, 300),    # ↑ Min value
+        'subsample_for_bin': trial.suggest_int('subsample_for_bin', 50000, 300000),
         'boosting_type': boosting_type,
-        'max_bin': trial.suggest_int('max_bin', 128, 512),
+        'max_bin': trial.suggest_int('max_bin', 128, 256),  # Lower for regularization
         'objective': 'regression_l1',
         'n_estimators': 500,
         'seed': SEED,
