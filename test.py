@@ -354,7 +354,7 @@ def lgb_rmsle(y_true, y_pred):
     return 'rmsle', rmsle(y_true, y_pred), False # lower is better
 
 # --- Custom Early Stopping Callback with Overfitting Detection ---
-def early_stopping_with_overfit(stopping_rounds=100, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
+def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
     """
     Custom LightGBM callback for early stopping with overfitting detection.
     Stops if validation loss doesn't improve for `stopping_rounds` OR
@@ -623,7 +623,8 @@ def multi_seed_overfitting_patience_analysis(train_df, valid_df, FEATURES, TARGE
 # --- Custom GroupTimeSeriesSplit ---
 class GroupTimeSeriesSplit:
     """
-    Custom cross-validator for time series data with non-overlapping groups.
+    Optimized cross-validator for time series data with non-overlapping groups.
+    Precomputes group-to-indices mapping for faster splits.
     Each group appears in only one validation fold, and time order is respected.
     """
     def __init__(self, n_splits=5):
@@ -632,19 +633,28 @@ class GroupTimeSeriesSplit:
     def split(self, X, y=None, groups=None):
         if groups is None:
             raise ValueError("Group labels must be provided for GroupTimeSeriesSplit.")
-        unique_groups = pd.Series(groups).drop_duplicates().tolist()
-        n_groups = len(unique_groups)
+        groups = pd.Series(groups).reset_index(drop=True)
+        # Precompute group to row indices mapping
+        group_to_indices = {}
+        for idx, group in enumerate(groups):
+            group_to_indices.setdefault(group, []).append(idx)
+        unique_groups = list(group_to_indices.keys())
         group_folds = np.array_split(unique_groups, self.n_splits)
         for fold_groups in group_folds:
-            val_mask = pd.Series(groups).isin(fold_groups)
-            train_mask = ~val_mask
-            train_idx = np.where(train_mask)[0]
-            val_idx = np.where(val_mask)[0]
-            # Sort indices by time if possible, but keep as positional indices
-            if 'week' in X.columns:
-                train_idx = train_idx[np.argsort(X.iloc[train_idx]['week'].values)]
-                val_idx = val_idx[np.argsort(X.iloc[val_idx]['week'].values)]
-            yield train_idx, val_idx
+            val_indices = []
+            for g in fold_groups:
+                val_indices.extend(group_to_indices[g])
+            val_indices = np.array(val_indices)
+            train_groups = set(unique_groups) - set(fold_groups)
+            train_indices = []
+            for g in train_groups:
+                train_indices.extend(group_to_indices[g])
+            train_indices = np.array(train_indices)
+            # Sort indices by time if possible
+            if hasattr(X, 'iloc') and 'week' in X.columns:
+                train_indices = train_indices[np.argsort(X.iloc[train_indices]['week'].values)]
+                val_indices = val_indices[np.argsort(X.iloc[val_indices]['week'].values)]
+            yield train_indices, val_indices
 
 
 
@@ -931,7 +941,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         'boosting_type': trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss']),
         'max_bin': trial.suggest_int('max_bin', 128, 512),
         'objective': 'regression_l1',
-        'n_estimators': 2000,
+        'n_estimators': 500,
         'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
@@ -976,7 +986,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
                 eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
                           (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
                 eval_metric=lgb_rmsle,
-                callbacks=[early_stopping_with_overfit(100, OVERFIT_ROUNDS, verbose=False)]
+                callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)]
             ).predict(train_split_df.iloc[valid_idx][selected_features])
         )
         for train_idx, valid_idx in gtscv.split(train_split_df, groups=groups)
