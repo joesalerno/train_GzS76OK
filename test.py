@@ -31,7 +31,7 @@ N_ENSEMBLE_MODELS = 1
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 # Other features (not directly dependent on recursive prediction)
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 1 # Number of Optuna trials (increased for better search)
+OPTUNA_TRIALS = 10000 # Number of Optuna trials (increased for better search)
 OPTUNA_NJOBS = 1  # Use sequential Optuna trials for best resource usage with LGBM
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
