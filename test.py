@@ -19,8 +19,8 @@ import csv
 import random
 from optuna.integration import LightGBMPruningCallback
 
-# import warnings
-# warnings.filterwarnings("ignore", message="The reported value is ignored because this `step` .* is already reported.")
+import warnings
+warnings.filterwarnings("ignore", message="The reported value is ignored because this `step` .* is already reported.")
 
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
