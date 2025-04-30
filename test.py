@@ -24,8 +24,7 @@ DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
-SEED = 9001
-# SEED = 42
+SEED = 42
 LAG_WEEKS = [1, 2, 3, 5, 10]
 ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 N_ENSEMBLE_MODELS = 1
@@ -907,12 +906,11 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
     return results
 
 # --- Run empirical group split test before Optuna tuning ---
-try:
-    empirical_group_split_test(train_split_df, FEATURES, TARGET, params=final_params, n_splits=3, max_folds=3)
-except Exception as e:
-    logging.warning(f"Could not run empirical group split test: {e}")
+# try:
+#     empirical_group_split_test(train_split_df, FEATURES, TARGET, params=final_params, n_splits=3, max_folds=3)
+# except Exception as e:
+#     logging.warning(f"Could not run empirical group split test: {e}")
 
-exit(0)  # Exit early to avoid running the rest of the script
 
 # --- Feature Selection and Hyperparameter Tuning with Optuna ---
 def optuna_feature_selection_and_hyperparam_objective(trial):
@@ -975,7 +973,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
             LGBMRegressor(**params).fit(
                 train_split_df.iloc[train_idx][selected_features],
                 train_split_df.iloc[train_idx][TARGET],
-                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_split_df][TARGET]),
+                eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
                           (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
                 eval_metric=lgb_rmsle,
                 callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
