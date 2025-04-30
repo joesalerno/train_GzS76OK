@@ -354,7 +354,7 @@ def lgb_rmsle(y_true, y_pred):
     return 'rmsle', rmsle(y_true, y_pred), False # lower is better
 
 # --- Custom Early Stopping Callback with Overfitting Detection ---
-def early_stopping_with_overfit(stopping_rounds=100, overfit_rounds=20, verbose=False):
+def early_stopping_with_overfit(stopping_rounds=100, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
     """
     Custom LightGBM callback for early stopping with overfitting detection.
     Stops if validation loss doesn't improve for `stopping_rounds` OR
@@ -976,7 +976,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
                 eval_set=[(train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
                           (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])],
                 eval_metric=lgb_rmsle,
-                callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
+                callbacks=[early_stopping_with_overfit(100, OVERFIT_ROUNDS, verbose=False)]
             ).predict(train_split_df.iloc[valid_idx][selected_features])
         )
         for train_idx, valid_idx in gtscv.split(train_split_df, groups=groups)
@@ -1112,7 +1112,7 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
                 train_df[FEATURES], train_df[TARGET],
                 eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
                 eval_metric=eval_metric,
-                callbacks=[early_stopping_with_overfit(300, 20, verbose=False)],
+                callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)],
                 categorical_feature=CATEGORICAL_FEATURES
             )
         else:
