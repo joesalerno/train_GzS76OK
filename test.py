@@ -24,7 +24,8 @@ DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
-SEED = 42
+SEED = 9001
+# SEED = 42
 LAG_WEEKS = [1, 2, 3, 5, 10]
 ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 N_ENSEMBLE_MODELS = 1
@@ -640,10 +641,10 @@ class GroupTimeSeriesSplit:
             train_mask = ~val_mask
             train_idx = np.where(train_mask)[0]
             val_idx = np.where(val_mask)[0]
-            # Sort indices by time if possible
+            # Sort indices by time if possible, but keep as positional indices
             if 'week' in X.columns:
-                train_idx = X.iloc[train_idx].sort_values('week').index.values
-                val_idx = X.iloc[val_idx].sort_values('week').index.values
+                train_idx = train_idx[np.argsort(X.iloc[train_idx]['week'].values)]
+                val_idx = val_idx[np.argsort(X.iloc[val_idx]['week'].values)]
             yield train_idx, val_idx
 
 
@@ -967,7 +968,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     if len(selected_features) < 10:
         return float('inf')
     gtscv = GroupTimeSeriesSplit(n_splits=3)
-    groups = train_split_df["meal_id"]
+    groups = train_split_df["center_id"]
     return np.mean([
         rmsle(
             train_split_df.iloc[valid_idx][TARGET],
