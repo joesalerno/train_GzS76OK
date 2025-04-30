@@ -856,6 +856,57 @@ class GroupTimeSeriesSplit:
 
 
 
+# --- Empirical GroupTimeSeriesSplit Grouping Strategy Test ---
+def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits=3, max_folds=3):
+    """
+    Empirically test GroupTimeSeriesSplit with different groupings:
+    - meal_id only
+    - center_id only
+    - (center_id, meal_id) composite
+    Prints mean/std RMSLE for each and recommends the best.
+    """
+    from collections import OrderedDict
+    groupings = OrderedDict({
+        'meal_id': train_df['meal_id'],
+        'center_id': train_df['center_id'],
+        'center_meal': list(zip(train_df['center_id'], train_df['meal_id'])),
+    })
+    results = {}
+    for name, groups in groupings.items():
+        rmsles = []
+        gtscv = GroupTimeSeriesSplit(n_splits=n_splits)
+        print(f"\nTesting GroupTimeSeriesSplit with groups = {name}...")
+        for fold, (train_idx, val_idx) in enumerate(gtscv.split(train_df, groups=groups)):
+            if fold >= max_folds:
+                break
+            X_tr, X_val = train_df.iloc[train_idx][FEATURES], train_df.iloc[val_idx][FEATURES]
+            y_tr, y_val = train_df.iloc[train_idx][TARGET], train_df.iloc[val_idx][TARGET]
+            model = LGBMRegressor(**(params or final_params), n_estimators=300, random_state=SEED)
+            model.fit(X_tr, y_tr)
+            y_pred = model.predict(X_val)
+            score = rmsle(y_val, y_pred)
+            rmsles.append(score)
+            print(f"  Fold {fold+1}: RMSLE={score:.4f}")
+        mean_rmsle = np.mean(rmsles)
+        std_rmsle = np.std(rmsles)
+        results[name] = (mean_rmsle, std_rmsle)
+        print(f"Mean RMSLE: {mean_rmsle:.5f}, Std: {std_rmsle:.5f}")
+    # Recommend best
+    best_group = min(results, key=lambda k: results[k][0])
+    print("\nSummary of Grouping Strategies:")
+    for k, (mean_r, std_r) in results.items():
+        print(f"  {k:15s}: Mean RMSLE={mean_r:.5f}, Std={std_r:.5f}")
+    print(f"\nRecommended grouping for GroupTimeSeriesSplit: {best_group} (lowest mean RMSLE)")
+    return results
+
+# --- Run empirical group split test before Optuna tuning ---
+try:
+    empirical_group_split_test(train_split_df, FEATURES, TARGET, params=final_params, n_splits=3, max_folds=3)
+except Exception as e:
+    logging.warning(f"Could not run empirical group split test: {e}")
+
+exit(0)  # Exit early to avoid running the rest of the script
+
 # --- Feature Selection and Hyperparameter Tuning with Optuna ---
 def optuna_feature_selection_and_hyperparam_objective(trial):
     # Hyperparameter search space
@@ -909,7 +960,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
     if len(selected_features) < 10:
         return float('inf')
-    tscv = TimeSeriesSplit(n_splits=3)
+    gtscv = GroupTimeSeriesSplit(n_splits=3)
+    groups = train_split_df["meal_id"]
     return np.mean([
         rmsle(
             train_split_df.iloc[valid_idx][TARGET],
@@ -922,7 +974,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
                 callbacks=[early_stopping_with_overfit(100, 20, verbose=False)]
             ).predict(train_split_df.iloc[valid_idx][selected_features])
         )
-        for train_idx, valid_idx in tscv.split(train_split_df)
+        for train_idx, valid_idx in gtscv.split(train_split_df, groups=groups)
     ])
 
 # --- Optuna Feature Selection + Hyperparameter Tuning ---
