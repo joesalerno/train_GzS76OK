@@ -739,7 +739,7 @@ def compare_time_series_cv(train_df, FEATURES, TARGET, output_dir="output", seed
                     X_val = X_val.drop(columns=['week'])
                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
                 model = LGBMRegressor(n_estimators=2000, random_state=seed)
-                model.fit(X_train, y_train, callbacks=[early_stopping_with_overfit(100, 20, verbose=False)])
+                model.fit(X_train, y_train, callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)])
                 y_pred = model.predict(X_val)
                 rmsle = np.sqrt(mean_squared_log_error(np.maximum(0, y_val), np.maximum(0, y_pred)))
                 mae = mean_absolute_error(y_val, y_pred)
@@ -1041,7 +1041,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
                 eval_metric=rmsle_lgbm,
                 callbacks=[
                     LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1', ),
-                    early_stopping_with_overfit(100, 20, verbose=False)
+                    early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
                 ]
         )
         y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
@@ -1120,7 +1120,7 @@ feature_hyperparam_study = optuna.create_study(
     load_if_exists=True,
     sampler=NSGAIISampler(
         seed=SEED,
-        population_size=100,
+        population_size=32,
         crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
         crossover_prob=0.9,
         swapping_prob=0.5,
