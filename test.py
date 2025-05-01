@@ -32,7 +32,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 1 # Number of Optuna trials (increased for better search)
+OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -613,6 +613,41 @@ def multi_seed_overfitting_patience_analysis(train_df, valid_df, FEATURES, TARGE
 #         val_idx = df[(df['week'] >= unique_weeks[val_start]) & (df['week'] <= unique_weeks[val_end - 1])].index
 #         yield train_idx, val_idx
 
+# --- Custom GroupTimeSeriesSplit ---
+class GroupTimeSeriesSplit:
+    """
+    Optimized cross-validator for time series data with non-overlapping groups.
+    Precomputes group-to-indices mapping for faster splits.
+    Each group appears in only one validation fold, and time order is respected.
+    """
+    def __init__(self, n_splits=5):
+        self.n_splits = n_splits
+
+    def split(self, X, y=None, groups=None):
+        if groups is None:
+            raise ValueError("Group labels must be provided for GroupTimeSeriesSplit.")
+        groups = pd.Series(groups).reset_index(drop=True)
+        # Precompute group to row indices mapping
+        group_to_indices = {}
+        for idx, group in enumerate(groups):
+            group_to_indices.setdefault(group, []).append(idx)
+        unique_groups = list(group_to_indices.keys())
+        group_folds = np.array_split(unique_groups, self.n_splits)
+        for fold_groups in group_folds:
+            val_indices = []
+            for g in fold_groups:
+                val_indices.extend(group_to_indices[g])
+            val_indices = np.array(val_indices)
+            train_groups = set(unique_groups) - set(fold_groups)
+            train_indices = []
+            for g in train_groups:
+                train_indices.extend(group_to_indices[g])
+            train_indices = np.array(train_indices)
+            # Sort indices by time if possible
+            if hasattr(X, 'iloc') and 'week' in X.columns:
+                train_indices = train_indices[np.argsort(X.iloc[train_indices]['week'].values)]
+                val_indices = val_indices[np.argsort(X.iloc[val_indices]['week'].values)]
+            yield train_indices, val_indices
 
 
 # --- Rolling Window GroupTimeSeriesSplit ---
@@ -652,80 +687,95 @@ class RollingGroupTimeSeriesSplit:
             val_indices = np.where(val_mask & pd.notnull(groups))[0]
             yield train_indices, val_indices
 
-
-
-# def compare_time_series_cv(train_df, FEATURES, TARGET, output_dir="output", seeds=[13, 123, 1999, 2025, 9001]):
-#     """
-#     Compare TimeSeriesSplit and GroupTimeSeriesSplit in detail, including per-fold metrics and plots, for multiple seeds.
-#     """
-#     from lightgbm import LGBMRegressor
-#     from sklearn.model_selection import TimeSeriesSplit
-#     from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
-#     import numpy as np
-#     import matplotlib.pyplot as plt
-#     import os
-#     results = []
-#     all_folds = []
-#     for seed in seeds:
-#         np.random.seed(seed)
-#         cv_methods = {
-#             'TimeSeriesSplit': TimeSeriesSplit(n_splits=5),
-#             'GroupTimeSeriesSplit': GroupTimeSeriesSplit(n_splits=5)
-#         }
-#         X = train_df[FEATURES]
-#         y = train_df[TARGET]
-#         groups = train_df['center_id'] if 'center_id' in train_df.columns else None
-#         for name, cv in cv_methods.items():
-#             print(f"\nTesting {name} (seed={seed})...")
-#             fold_metrics = []
-#             if name == 'GroupTimeSeriesSplit' and groups is None:
-#                 print("No group labels available, skipping GroupTimeSeriesSplit.")
-#                 continue
-#             splits = cv.split(X, y, groups) if name == 'GroupTimeSeriesSplit' else cv.split(X, y)
-#             for fold, (train_idx, val_idx) in enumerate(splits):
-#                 X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-#                 y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-#                 model = LGBMRegressor(n_estimators=2000, random_state=seed)
-#                 model.fit(X_train, y_train, callbacks=[early_stopping_with_overfit(100, 20, verbose=False)])
-#                 y_pred = model.predict(X_val)
-#                 rmsle = np.sqrt(mean_squared_log_error(np.maximum(0, y_val), np.maximum(0, y_pred)))
-#                 mae = mean_absolute_error(y_val, y_pred)
-#                 r2 = r2_score(y_val, y_pred)
-#                 fold_metrics.append({'seed': seed, 'cv': name, 'fold': fold+1, 'rmsle': rmsle, 'mae': mae, 'r2': r2})
-#                 print(f"  Fold {fold+1}: RMSLE={rmsle:.4f}, MAE={mae:.2f}, R2={r2:.4f}")
-#             # Save results
-#             all_folds.extend(fold_metrics)
-#             results.append({
-#                 'seed': seed,
-#                 'cv': name,
-#                 'mean_rmsle': np.mean([m['rmsle'] for m in fold_metrics]),
-#                 'std_rmsle': np.std([m['rmsle'] for m in fold_metrics]),
-#                 'mean_mae': np.mean([m['mae'] for m in fold_metrics]),
-#                 'std_mae': np.std([m['mae'] for m in fold_metrics]),
-#                 'mean_r2': np.mean([m['r2'] for m in fold_metrics]),
-#                 'std_r2': np.std([m['r2'] for m in fold_metrics]),
-#                 'folds': fold_metrics
-#             })
-#             # Plot per-fold RMSLE for this seed and CV type
-#             plt.plot([m['rmsle'] for m in fold_metrics], marker='o', label=f"{name} (seed={seed})")
-#     plt.xlabel('Fold')
-#     plt.ylabel('RMSLE')
-#     plt.title('Time Series CV Comparison: Fold RMSLEs (Multiple Seeds)')
-#     plt.legend()
-#     plt.tight_layout()
-#     plot_path = os.path.join(output_dir, 'timeseries_cv_comparison_multiseed.png')
-#     plt.savefig(plot_path)
-#     plt.close()
-#     # Save results to CSV
-#     import pandas as pd
-#     pd.DataFrame(all_folds).to_csv(os.path.join(output_dir, 'timeseries_cv_comparison_folds_multiseed.csv'), index=False)
-#     pd.DataFrame(results).drop('folds', axis=1).to_csv(os.path.join(output_dir, 'timeseries_cv_comparison_summary_multiseed.csv'), index=False)
-#     print(f"\nDetailed results saved to {plot_path}, timeseries_cv_comparison_folds_multiseed.csv, and timeseries_cv_comparison_summary_multiseed.csv")
+def compare_time_series_cv(train_df, FEATURES, TARGET, output_dir="output", seeds=[13, 123, 1999, 2025, 9001]):
+    """
+    Compare TimeSeriesSplit and GroupTimeSeriesSplit in detail, including per-fold metrics and plots, for multiple seeds.
+    """
+    from lightgbm import LGBMRegressor
+    from sklearn.model_selection import TimeSeriesSplit
+    from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import os
+    results = []
+    all_folds = []
+    for seed in seeds:
+        np.random.seed(seed)
+        cv_methods = {
+            'TimeSeriesSplit': TimeSeriesSplit(n_splits=5),
+            'GroupTimeSeriesSplit': GroupTimeSeriesSplit(n_splits=5),
+            'RollingGroupTimeSeriesSplit': RollingGroupTimeSeriesSplit(n_splits=5, train_window=120, val_window=10, week_col='week')
+        }
+        X = train_df[FEATURES]
+        # For RollingGroupTimeSeriesSplit, we need to include 'week' column
+        if 'week' not in FEATURES:
+            X_with_week = train_df[FEATURES + ['week']]
+        else:
+            X_with_week = X
+        y = train_df[TARGET]
+        groups = train_df['center_id'] if 'center_id' in train_df.columns else None
+        for name, cv in cv_methods.items():
+            print(f"\nTesting {name} (seed={seed})...")
+            fold_metrics = []
+            # Handle group requirements
+            if name in ['GroupTimeSeriesSplit', 'RollingGroupTimeSeriesSplit'] and groups is None:
+                print(f"No group labels available, skipping {name}.")
+                continue
+            if name == 'RollingGroupTimeSeriesSplit':
+                splits = cv.split(X_with_week, y, groups=groups)
+                X_used = X_with_week
+            elif name == 'GroupTimeSeriesSplit':
+                splits = cv.split(X, y, groups=groups)
+                X_used = X
+            else:
+                splits = cv.split(X, y)
+                X_used = X
+            for fold, (train_idx, val_idx) in enumerate(splits):
+                X_train, X_val = X_used.iloc[train_idx], X_used.iloc[val_idx]
+                # Drop 'week' column for RollingGroupTimeSeriesSplit before fitting
+                if name == 'RollingGroupTimeSeriesSplit' and 'week' in X_train.columns:
+                    X_train = X_train.drop(columns=['week'])
+                    X_val = X_val.drop(columns=['week'])
+                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+                model = LGBMRegressor(n_estimators=2000, random_state=seed)
+                model.fit(X_train, y_train, callbacks=[early_stopping_with_overfit(100, 20, verbose=False)])
+                y_pred = model.predict(X_val)
+                rmsle = np.sqrt(mean_squared_log_error(np.maximum(0, y_val), np.maximum(0, y_pred)))
+                mae = mean_absolute_error(y_val, y_pred)
+                r2 = r2_score(y_val, y_pred)
+                fold_metrics.append({'seed': seed, 'cv': name, 'fold': fold+1, 'rmsle': rmsle, 'mae': mae, 'r2': r2})
+                print(f"  Fold {fold+1}: RMSLE={rmsle:.4f}, MAE={mae:.2f}, R2={r2:.4f}")
+            # Save results
+            all_folds.extend(fold_metrics)
+            results.append({
+                'seed': seed,
+                'cv': name,
+                'mean_rmsle': np.mean([m['rmsle'] for m in fold_metrics]),
+                'std_rmsle': np.std([m['rmsle'] for m in fold_metrics]),
+                'mean_mae': np.mean([m['mae'] for m in fold_metrics]),
+                'std_mae': np.std([m['mae'] for m in fold_metrics]),
+                'mean_r2': np.mean([m['r2'] for m in fold_metrics]),
+                'std_r2': np.std([m['r2'] for m in fold_metrics]),
+                'folds': fold_metrics
+            })
+            # Plot per-fold RMSLE for this seed and CV type
+            plt.plot([m['rmsle'] for m in fold_metrics], marker='o', label=f"{name} (seed={seed})")
+    plt.xlabel('Fold')
+    plt.ylabel('RMSLE')
+    plt.title('Time Series CV Comparison: Fold RMSLEs (Multiple Seeds)')
+    plt.legend()
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, 'timeseries_cv_comparison_multiseed.png')
+    plt.savefig(plot_path)
+    plt.close()
+    # Save results to CSV
+    import pandas as pd
+    pd.DataFrame(all_folds).to_csv(os.path.join(output_dir, 'timeseries_cv_comparison_folds_multiseed.csv'), index=False)
+    pd.DataFrame(results).drop('folds', axis=1).to_csv(os.path.join(output_dir, 'timeseries_cv_comparison_summary_multiseed.csv'), index=False)
+    print(f"\nDetailed results saved to {plot_path}, timeseries_cv_comparison_folds_multiseed.csv, and timeseries_cv_comparison_summary_multiseed.csv")
 
 # --- Early exit for debugging purposes ---
 # compare_time_series_cv(train_df, FEATURES, TARGET, output_dir=OUTPUT_DIRECTORY, seeds=[13, 123, 1999, 2025, 9001])
-
-# exit(0)  # Exit early to avoid running the rest of the script
 
 # --- Cross-Validation Strategy Experiment ---
 # def run_cv_strategy_experiment(train_df, FEATURES, TARGET, output_dir="output"):
@@ -1052,13 +1102,25 @@ class TqdmOptunaCallback:
         self.pbar.close()
 
 # Create the study with NSGAIISampler
+# --- NSGAIISampler advanced configuration ---
+from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
+
+# Recommended: population_size = 16-32, crossover_prob=0.9, swapping_prob=0.5, mutation_prob=1/num_params
+
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(
     direction="minimize",
     study_name=OPTUNA_STUDY_NAME,
     storage=optuna_storage,
     load_if_exists=True,
-    sampler=NSGAIISampler(seed=SEED)
+    sampler=NSGAIISampler(
+        seed=SEED,
+        population_size=24,
+        crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
+        crossover_prob=0.9,
+        swapping_prob=0.5,
+        # mutation_prob=mutation_prob
+    )
 )
 # Pass the study to the callback so it can initialize best_value/best_trial
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
@@ -1174,11 +1236,13 @@ try:
         shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
     else:
         shap_sample = train_df.copy()
-    # Convert categorical features to string for SHAP coloring
+    # Ensure categorical features in SHAP sample match training categories
     shap_sample_for_shap = shap_sample.copy()
     for col in CATEGORICAL_FEATURES:
-        if col in shap_sample_for_shap.columns:
-            shap_sample_for_shap[col] = shap_sample_for_shap[col].astype(str)
+        if col in shap_sample_for_shap.columns and col in train_df.columns:
+            if pd.api.types.is_categorical_dtype(train_df[col]):
+                shap_sample_for_shap[col] = shap_sample_for_shap[col].astype('category')
+                shap_sample_for_shap[col] = shap_sample_for_shap[col].cat.set_categories(train_df[col].cat.categories)
     explainer = shap.TreeExplainer(ensemble_models[0])
     shap_values = explainer.shap_values(shap_sample_for_shap[FEATURES])
     shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
