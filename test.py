@@ -1113,13 +1113,13 @@ from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(
     direction="minimize",
-    pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=100, interval_steps=1),  
+    pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=15, interval_steps=1),  
     study_name=OPTUNA_STUDY_NAME,
     storage=optuna_storage,
     load_if_exists=True,
     sampler=NSGAIISampler(
         seed=SEED,
-        population_size=36,
+        population_size=100,
         crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
         crossover_prob=0.9,
         swapping_prob=0.5,
