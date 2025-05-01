@@ -32,6 +32,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
+N_WARMUP_STEPS = 30 # Warmup steps for Optuna pruning
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
@@ -1022,7 +1023,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     
     # # Ensure selected features are unique and not empty
     if len(selected_features) < 5:
-        return float('inf')
+        raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
 
     # Use rolling window group time series split
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
@@ -1046,7 +1047,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
         score = (rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred))
         if (score is None or np.isnan(score) or np.isinf(score)):
-            return float('inf')
+            raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
         scores.append(score)
     return np.mean(scores)
 
@@ -1113,7 +1114,7 @@ from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(
     direction="minimize",
-    pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=15, interval_steps=1),  
+    pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=N_WARMUP_STEPS),  
     study_name=OPTUNA_STUDY_NAME,
     storage=optuna_storage,
     load_if_exists=True,
@@ -1127,10 +1128,23 @@ feature_hyperparam_study = optuna.create_study(
     )
 )
 # Pass the study to the callback so it can initialize best_value/best_trial
-optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
-feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=1)
-optuna_callback.close()
 
+optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
+try:
+    feature_hyperparam_study.optimize(
+        optuna_feature_selection_and_hyperparam_objective,
+        n_trials=OPTUNA_TRIALS,
+        timeout=7200,
+        callbacks=[optuna_callback],
+        n_jobs=1
+    )
+except KeyboardInterrupt:
+    print("\nInterrupted! Waiting for the current trial to finish and be saved...")
+finally:
+    optuna_callback.close()
+    print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
+    print(f"Final best trial: {feature_hyperparam_study.best_trial}")
+optuna_callback.close()
 
 # Extract best features and params, but handle missing best_trial gracefully
 if feature_hyperparam_study.best_trial is None:
