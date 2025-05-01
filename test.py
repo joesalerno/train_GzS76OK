@@ -1019,8 +1019,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
             selected_features.extend([sin, cos])
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
-    if len(selected_features) < 10:
+    
+    # # Ensure selected features are unique and not empty
+    if len(selected_features) < 5:
         return float('inf')
+
     # Use rolling window group time series split
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
@@ -1036,7 +1039,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
                 ],
                 eval_metric=rmsle_lgbm,
                 callbacks=[
-                    LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
+                    LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1', ),
                     early_stopping_with_overfit(100, 20, verbose=False)
                 ]
         )
@@ -1110,12 +1113,13 @@ from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(
     direction="minimize",
+    pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=100, interval_steps=1),  
     study_name=OPTUNA_STUDY_NAME,
     storage=optuna_storage,
     load_if_exists=True,
     sampler=NSGAIISampler(
         seed=SEED,
-        population_size=24,
+        population_size=36,
         crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
         crossover_prob=0.9,
         swapping_prob=0.5,
