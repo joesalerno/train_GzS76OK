@@ -2,6 +2,8 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')
 
+from functools import partial
+
 import os
 OUTPUT_DIRECTORY = "output"
 os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
@@ -129,21 +131,21 @@ def create_selected_interaction_features(df):
         df_out['meal_orders_mean_x_emailer_for_promotion'] = df_out['meal_orders_mean'] * df_out['emailer_for_promotion']
     return df_out
 
-def add_promo_recency_features(df):
-    df_out = df.copy()
-    group_cols = [col for col in ["center_id", "meal_id"] if col in df_out.columns]
-    for promo_col, name in [("emailer_for_promotion", "weeks_since_last_emailer"), ("homepage_featured", "weeks_since_last_homepage")]:
-        if promo_col in df_out.columns:
-            def weeks_since_last(x):
-                last = -1
-                out = []
-                for i, val in enumerate(x):
-                    if val:
-                        last = i
-                    out.append(i - last if last != -1 else np.nan)
-                return out
-            df_out[name] = df_out.groupby(group_cols, observed=False)[promo_col].transform(weeks_since_last)
-    return df_out
+# def add_promo_recency_features(df):
+#     df_out = df.copy()
+#     group_cols = [col for col in ["center_id", "meal_id"] if col in df_out.columns]
+#     for promo_col, name in [("emailer_for_promotion", "weeks_since_last_emailer"), ("homepage_featured", "weeks_since_last_homepage")]:
+#         if promo_col in df_out.columns:
+#             def weeks_since_last(x):
+#                 last = -1
+#                 out = []
+#                 for i, val in enumerate(x):
+#                     if val:
+#                         last = i
+#                     out.append(i - last if last != -1 else np.nan)
+#                 return out
+#             df_out[name] = df_out.groupby(group_cols, observed=False)[promo_col].transform(weeks_since_last)
+#     return df_out
 
 def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_train=True):
     df = df.copy()
@@ -176,12 +178,13 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], [3, 5, 10])
     df_out = create_group_aggregates(df_out)
     df_out = create_selected_interaction_features(df_out)
-    df_out = add_promo_recency_features(df_out)
+    # df_out = add_promo_recency_features(df_out)
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
     lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
         "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home",
-        "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_mean", "_std", "weeks_since_last_emailer", "weeks_since_last_homepage"
+        "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_mean", "_std"
+        # "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_mean", "_std", "weeks_since_last_emailer", "weeks_since_last_homepage"
     ])]
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
     if cols_to_fill:
@@ -270,10 +273,10 @@ for col in [
         features_set.add(col)
 
 # Add recency features
-for col in ["weeks_since_last_emailer", "weeks_since_last_homepage"]:
-    if col in train_df.columns and col not in features_set:
-        FEATURES.append(col)
-        features_set.add(col)
+# for col in ["weeks_since_last_emailer", "weeks_since_last_homepage"]:
+#     if col in train_df.columns and col not in features_set:
+#         FEATURES.append(col)
+#         features_set.add(col)
 
 # Remove one-hot columns for categoricals from FEATURES if present
 for prefix in ["category_", "cuisine_", "center_type_"]:
@@ -970,10 +973,34 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
 
 
 # --- Feature Selection and Hyperparameter Tuning with Optuna ---
-def optuna_feature_selection_and_hyperparam_objective(trial):
+
+# --- Precompute eligible features and all possible combos for Optuna feature interactions (module-level, before study) ---
+
+# --- Freeze eligible features for Optuna interaction search ---
+FROZEN_FEATURES_FOR_INTERACTIONS = [
+    'checkout_price', 'base_price', 'discount', 'discount_pct', 'price_diff',
+    'center_orders_mean', 'meal_orders_mean', 'meal_orders_mean_x_discount_pct',
+    'meal_orders_mean_x_emailer_for_promotion', 'price_diff_x_emailer', 'price_diff_x_homepage',
+    'discount_pct_x_emailer', 'discount_pct_x_homepage'
+    # Add more features as needed, but do not change this list between runs of the same study!
+]
+from itertools import combinations
+MAX_INTERACTION_ORDER = min(4, len(FROZEN_FEATURES_FOR_INTERACTIONS))
+MAX_INTERACTIONS_PER_ORDER = {2: 5, 3: 3, 4: 2, 5: 2}
+ALL_COMBOS_STR = {}
+
+for order in range(2, MAX_INTERACTION_ORDER + 1):
+    combos = list(combinations(FROZEN_FEATURES_FOR_INTERACTIONS, order))
+    ALL_COMBOS_STR[order] = ["|".join(str(f) for f in combo) for combo in combos]
+
+# Defensive: ensure all elements are strings (Optuna requires this for categorical choices)
+for order, combos in ALL_COMBOS_STR.items():
+    for c in combos:
+        assert isinstance(c, str), f"ALL_COMBOS_STR[{order}] contains non-string: {c} ({type(c)})"
+
+def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=train_split_df):
     # Hyperparameter search space
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
-    # Only set bagging params if not using GOSS
     if boosting_type != 'goss':
         bagging_fraction = trial.suggest_float('bagging_fraction', 0.8, 1.0)  # ↑ Min value for more regularization
         bagging_freq = trial.suggest_int('bagging_freq', 1, 7)
@@ -1004,14 +1031,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     }
     # Find all features with sin/cos in their name (excluding those already in a pair)
     sincos_features = [f for f in FEATURES if re.search(r'(_sin|_cos)', f)]
-    # Group into pairs by prefix (e.g. 'num_orders_rolling_mean_2_x_weekofyear')
-    pair_prefixes = set()
     pair_map = {}
     for f in sincos_features:
         m = re.match(r'(.*)_sin$', f)
         if m and f.replace('_sin', '_cos') in sincos_features:
             prefix = m.group(1)
-            pair_prefixes.add(prefix)
             pair_map[prefix] = (f, f.replace('_sin', '_cos'))
     # For each pair, add a trial param
     selected_features = []
@@ -1021,8 +1045,37 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
             selected_features.extend([sin, cos])
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
-    
-    # # Ensure selected features are unique and not empty
+
+
+
+    interaction_features = []
+    new_interaction_cols = {}
+    used_interactions = set()
+    for order in range(2, MAX_INTERACTION_ORDER + 1):
+        # Use only the precomputed, static list of strings
+        all_combos_str = ALL_COMBOS_STR[order]
+        max_this_order = min(MAX_INTERACTIONS_PER_ORDER.get(order, 1), len(all_combos_str))
+        n_this_order = trial.suggest_int(f"n_{order}th_order", 0, max_this_order) if max_this_order > 0 else 0
+        for i in range(n_this_order):
+            combo_str = trial.suggest_categorical(f"inter_{order}th_{i}", all_combos_str)
+            if combo_str in used_interactions:
+                continue
+            used_interactions.add(combo_str)
+            combo = combo_str.split("|")
+            new_col = "_prod_".join(combo)
+            if new_col not in train_split_df.columns and new_col not in new_interaction_cols:
+                # Multiply all features in combo
+                col_val = train_split_df[combo[0]]
+                for f in combo[1:]:
+                    col_val = col_val * train_split_df[f]
+                new_interaction_cols[new_col] = col_val
+            interaction_features.append(new_col)
+    if new_interaction_cols:
+        train_split_df = pd.concat([train_split_df, pd.DataFrame(new_interaction_cols, index=train_split_df.index)], axis=1)
+    selected_features += interaction_features
+
+    # Ensure selected features are unique and not empty
+    selected_features = list(dict.fromkeys(selected_features))
     if len(selected_features) < 5:
         raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
 
@@ -1033,20 +1086,20 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
         model = LGBMRegressor(**params)
         model.fit(
-                train_split_df.iloc[train_idx][selected_features],
-                train_split_df.iloc[train_idx][TARGET],
-                eval_set=[
-                    (train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
-                    (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
-                ],
-                eval_metric=rmsle_lgbm,
-                callbacks=[
-                    LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1', ),
-                    early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
-                ]
+            train_split_df.iloc[train_idx][selected_features],
+            train_split_df.iloc[train_idx][TARGET],
+            eval_set=[
+                (train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
+                (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
+            ],
+            eval_metric=rmsle_lgbm,
+            callbacks=[
+                LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1', ),
+                early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
+            ]
         )
         y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
-        score = (rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred))
+        score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred)
         if (score is None or np.isnan(score) or np.isinf(score)):
             raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
         scores.append(score)
@@ -1133,7 +1186,7 @@ feature_hyperparam_study = optuna.create_study(
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
 try:
     feature_hyperparam_study.optimize(
-        optuna_feature_selection_and_hyperparam_objective,
+        partial(optuna_feature_selection_and_hyperparam_objective, train_split_df=train_split_df),
         n_trials=OPTUNA_TRIALS,
         timeout=7200,
         callbacks=[optuna_callback],
@@ -1142,9 +1195,7 @@ try:
 except KeyboardInterrupt:
     print("\nInterrupted! Waiting for the current trial to finish and be saved...")
 finally:
-    optuna_callback.close()
     print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
-    print(f"Final best trial: {feature_hyperparam_study.best_trial}")
 optuna_callback.close()
 
 # Extract best features and params, but handle missing best_trial gracefully
