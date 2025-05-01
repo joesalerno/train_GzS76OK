@@ -984,10 +984,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
         scores.append(score)
     return np.mean(scores)
 
-logging.info("Starting Optuna feature+hyperparam selection...")
-# Reduce Optuna logging verbosity
-optuna.logging.set_verbosity(optuna.logging.WARNING)
-
 class TqdmOptunaCallback:
     def __init__(self, n_trials, study=None, print_every=1):
         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
@@ -1034,46 +1030,49 @@ class TqdmOptunaCallback:
     def close(self):
         self.pbar.close()
 
-# Create the study first
-optuna_storage = OPTUNA_DB
-feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
-# Pass the study to the callback so it can initialize best_value/best_trial
-optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
-feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=1)
-optuna_callback.close()
+# logging.info("Starting Optuna feature+hyperparam selection...")
+# # Reduce Optuna logging verbosity
+# optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+# # Create the study first
+# optuna_storage = OPTUNA_DB
+# feature_hyperparam_study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=optuna_storage, load_if_exists=True)
+# # Pass the study to the callback so it can initialize best_value/best_trial
+# optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
+# feature_hyperparam_study.optimize(optuna_feature_selection_and_hyperparam_objective, n_trials=OPTUNA_TRIALS, timeout=7200, callbacks=[optuna_callback], n_jobs=1)
+# optuna_callback.close()
 
-# Extract best features and params, but handle missing best_trial gracefully
-if feature_hyperparam_study.best_trial is None:
-    logging.warning("No completed Optuna trial found. Skipping feature/param extraction.")
-    SELECTED_FEATURES = FEATURES.copy()
-    best_params = final_params.copy()
-else:
-    best_mask = [feature_hyperparam_study.best_trial.params.get(f, False) for f in FEATURES]
-    SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
-    best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
-    if best_params.get('boosting_type') == 'goss':
-        best_params['bagging_fraction'] = 1.0
-        best_params['bagging_freq'] = 0
-    selected_pairs = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k.endswith('_pair')}
-    # Add both features from each selected cyclical pair
-    for pair_name, is_selected in selected_pairs.items():
-        if is_selected:
-            pair_feats = pair_name[:-5].split('_')
-            for i in range(1, len(pair_feats)):
-                if pair_feats[i].endswith('sin') or pair_feats[i].endswith('cos'):
-                    feat1 = '_'.join(pair_feats[:i+1])
-                    feat2 = '_'.join(pair_feats[i+1:])
-                    for feat in [feat1, feat2]:
-                        if feat and feat in train_df.columns and feat not in SELECTED_FEATURES:
-                            SELECTED_FEATURES.append(feat)
-                    break
-    logging.info(f"Optuna-selected params: {best_params}")
-    logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
+# # Extract best features and params, but handle missing best_trial gracefully
+# if feature_hyperparam_study.best_trial is None:
+#     logging.warning("No completed Optuna trial found. Skipping feature/param extraction.")
+#     SELECTED_FEATURES = FEATURES.copy()
+#     best_params = final_params.copy()
+# else:
+#     best_mask = [feature_hyperparam_study.best_trial.params.get(f, False) for f in FEATURES]
+#     SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
+#     best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
+#     if best_params.get('boosting_type') == 'goss':
+#         best_params['bagging_fraction'] = 1.0
+#         best_params['bagging_freq'] = 0
+#     selected_pairs = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k.endswith('_pair')}
+#     # Add both features from each selected cyclical pair
+#     for pair_name, is_selected in selected_pairs.items():
+#         if is_selected:
+#             pair_feats = pair_name[:-5].split('_')
+#             for i in range(1, len(pair_feats)):
+#                 if pair_feats[i].endswith('sin') or pair_feats[i].endswith('cos'):
+#                     feat1 = '_'.join(pair_feats[:i+1])
+#                     feat2 = '_'.join(pair_feats[i+1:])
+#                     for feat in [feat1, feat2]:
+#                         if feat and feat in train_df.columns and feat not in SELECTED_FEATURES:
+#                             SELECTED_FEATURES.append(feat)
+#                     break
+#     logging.info(f"Optuna-selected params: {best_params}")
+#     logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
 
-# Use SELECTED_FEATURES for final model and ensemble
-FEATURES = SELECTED_FEATURES
-final_params.update(best_params)
+# # Use SELECTED_FEATURES for final model and ensemble
+# FEATURES = SELECTED_FEATURES
+# final_params.update(best_params)
 
 # --- Set native categorical types for optimal LightGBM usage ---
 for col in ["category", "cuisine", "center_type", "center_id", "meal_id"]:
@@ -1084,6 +1083,170 @@ for col in ["category", "cuisine", "center_type", "center_id", "meal_id"]:
     if col in test_df.columns:
         test_df[col] = test_df[col].astype("category")
 CATEGORICAL_FEATURES = [col for col in ["category", "cuisine", "center_type", "center_id", "meal_id"] if col in FEATURES]
+
+# --- TPOT Implementation with Genetic Feature Interaction Discovery ---
+# (AutoML pipeline search including feature construction and interaction discovery)
+try:
+    from tpot import TPOTRegressor
+except ImportError:
+    import subprocess
+    subprocess.check_call(["python", "-m", "pip", "install", "tpot"])
+    from tpot import TPOTRegressor
+
+# Prepare data for TPOT (drop rows with missing target, use only numeric/categorical features)
+tpot_train = train_df.copy()
+tpot_valid = valid_df.copy()
+
+# TPOT does not handle categorical variables natively; encode categoricals
+from sklearn.metrics import make_scorer
+rmsle_scorer = make_scorer(rmsle, greater_is_better=False)
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, StandardScaler
+from sklearn.feature_selection import SelectPercentile, f_regression, mutual_info_regression
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import Lasso, Ridge
+from sklearn.tree import DecisionTreeRegressor
+def encode_categoricals(df, categorical_cols):
+    df = df.copy()
+    for col in categorical_cols:
+        if col in df.columns:
+            le = LabelEncoder()
+            df[col] = le.fit_transform(df[col].astype(str))
+    return df
+
+tpot_categoricals = [col for col in CATEGORICAL_FEATURES if col in tpot_train.columns]
+tpot_train_enc = encode_categoricals(tpot_train, tpot_categoricals)
+tpot_valid_enc = encode_categoricals(tpot_valid, tpot_categoricals)
+
+
+# --- Data validation for TPOT ---
+def check_tpot_data(X, y, label):
+    import numpy as np
+    if X.shape[1] == 0:
+        print(f"[TPOT] ERROR: No features in {label} set!")
+    if np.any(np.isnan(X)) or np.any(np.isinf(X)):
+        print(f"[TPOT] ERROR: {label} features contain NaN or inf values!")
+    if np.any(np.isnan(y)) or np.any(np.isinf(y)):
+        print(f"[TPOT] ERROR: {label} target contains NaN or inf values!")
+    if len(np.unique(y)) <= 1:
+        print(f"[TPOT] ERROR: {label} target is constant!")
+
+X_tpot = tpot_train_enc[FEATURES]
+y_tpot = tpot_train_enc[TARGET]
+X_valid_tpot = tpot_valid_enc[FEATURES]
+y_valid_tpot = tpot_valid_enc[TARGET]
+
+check_tpot_data(X_tpot, y_tpot, "train")
+check_tpot_data(X_valid_tpot, y_valid_tpot, "valid")
+
+# TPOT configuration for advanced feature construction (including interaction discovery)
+tpot_config = {
+    # Allow polynomial and interaction features
+    # 'sklearn.preprocessing.PolynomialFeatures': {
+    #     'degree': [2, 3],
+    #     'include_bias': [False],
+    #     'interaction_only': [False, True]
+    # },
+    # Allow feature selection
+    'sklearn.feature_selection.SelectPercentile': {
+        'percentile': list(range(10, 100, 10)),
+        'score_func': [f_regression, mutual_info_regression]
+    },
+    # Allow scaling
+    'sklearn.preprocessing.StandardScaler': {},
+    'sklearn.preprocessing.MinMaxScaler': {},
+    # Allow common regressors
+    'sklearn.ensemble.RandomForestRegressor': {
+        'n_estimators': [100, 200],
+        'max_features': ['auto', 'sqrt', 'log2'],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4],
+        'bootstrap': [True, False]
+    },
+    'sklearn.ensemble.GradientBoostingRegressor': {
+        'n_estimators': [100, 200],
+        'learning_rate': [0.01, 0.05, 0.1],
+        'max_depth': [3, 5, 7],
+        'subsample': [0.8, 1.0]
+    },
+    'sklearn.linear_model.Ridge': {
+        'alpha': [0.01, 0.1, 1.0, 10.0]
+    },
+    'sklearn.linear_model.Lasso': {
+        'alpha': [0.01, 0.1, 1.0, 10.0]
+    },
+    'sklearn.tree.DecisionTreeRegressor': {
+        'max_depth': [3, 5, 7, None],
+        'min_samples_split': [2, 5, 10]
+    }
+}
+
+
+# --- TPOTRegressor with advanced pipeline search and feature construction ---
+# All TPOT code is now protected by __name__ == "__main__" for Windows multiprocessing safety
+def main():
+    tpot_reg = TPOTRegressor(
+        generations=10,
+        population_size=40,
+        verbose=2,
+        random_state=SEED,
+        n_jobs=1,
+        max_time_mins=60,  # Stop after 1 hour
+        scorers=[rmsle_scorer],
+        periodic_checkpoint_folder=OUTPUT_DIRECTORY,
+        warm_start=True,
+        search_space='linear'  # Use the default linear search space; for custom, build a SearchSpace object
+    )
+
+
+    # from tqdm import tqdm
+    # import time
+    print("Starting TPOT pipeline search (this may take a while)...")
+    # Custom progress bar for TPOT generations
+    # Use the value passed to TPOTRegressor (not an attribute)
+    # n_generations = 10  # Should match the 'generations' argument above
+    # Fallback: Use tqdm with TPOT's verbose output as a simple progress indicator
+    # (Monkey-patching _fit_generation is not supported in recent TPOT versions)
+    print("[Progress bar] TPOT will print generation progress below. Watch for 'Generation X - ...' lines.")
+    tpot_reg.fit(X_tpot, y_tpot)
+
+    # Evaluate on validation set
+    def rmsle(y_true, y_pred):
+        y_true = np.array(y_true)
+        y_pred = np.array(y_pred).clip(0)
+        return np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
+
+    tpot_preds = tpot_reg.predict(X_valid_tpot)
+    tpot_rmsle = rmsle(y_valid_tpot, tpot_preds)
+    print(f"TPOT Validation RMSLE: {tpot_rmsle:.5f}")
+
+    # Export the best pipeline
+    import os
+    tpot_reg.export(os.path.join(OUTPUT_DIRECTORY, "tpot_best_pipeline.py"))
+
+    # Save predictions
+    pd.DataFrame({
+        'id': tpot_valid['id'].values if 'id' in tpot_valid.columns else np.arange(len(tpot_preds)),
+        'num_orders': np.round(tpot_preds).astype(int)
+    }).to_csv(os.path.join(OUTPUT_DIRECTORY, "tpot_validation_predictions.csv"), index=False)
+
+    print("TPOT pipeline and predictions saved.")
+
+    # Optionally, fit on all train+valid and predict on test for submission
+    if 'id' in test_df.columns:
+        tpot_test = test_df.copy()
+        tpot_test_enc = encode_categoricals(tpot_test, tpot_categoricals)
+        X_test_tpot = tpot_test_enc[FEATURES]
+        tpot_reg.fit(pd.concat([X_tpot, X_valid_tpot]), pd.concat([y_tpot, y_valid_tpot]))
+        test_preds = tpot_reg.predict(X_test_tpot)
+        pd.DataFrame({
+            'id': tpot_test['id'].values,
+            'num_orders': np.round(test_preds).astype(int)
+        }).to_csv(os.path.join(OUTPUT_DIRECTORY, "tpot_test_predictions.csv"), index=False)
+        print("TPOT test predictions saved.")
+
+if __name__ == "__main__":
+    main()
+    print ("TPOT pipeline search and predictions complete.")
 
 # --- Recursive Prediction and Ensemble Utilities ---
 def recursive_predict(model, train_df, predict_df, FEATURES, weekofyear_means=None, month_means=None):
@@ -1134,81 +1297,81 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
     return np.mean(preds_list, axis=0).round().astype(int), models
 
 # --- Recursive Ensemble Prediction with Selected Features ---
-logging.info("Running recursive ensemble prediction with selected features...")
-ensemble_preds, ensemble_models = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=N_ENSEMBLE_MODELS, eval_metric=lgb_rmsle)
-final_predictions_df = pd.DataFrame({'id': test_df['id'].astype(int), 'num_orders': ensemble_preds})
-submission_path_ensemble_final = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv")
-final_predictions_df.to_csv(submission_path_ensemble_final, index=False)
-logging.info(f"Ensemble submission file saved to {submission_path_ensemble_final}")
+# logging.info("Running recursive ensemble prediction with selected features...")
+# ensemble_preds, ensemble_models = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=N_ENSEMBLE_MODELS, eval_metric=lgb_rmsle)
+# final_predictions_df = pd.DataFrame({'id': test_df['id'].astype(int), 'num_orders': ensemble_preds})
+# submission_path_ensemble_final = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv")
+# final_predictions_df.to_csv(submission_path_ensemble_final, index=False)
+# logging.info(f"Ensemble submission file saved to {submission_path_ensemble_final}")
 
 # --- SHAP Analysis for Ensemble (using first model as representative) ---
-logging.info("Calculating SHAP values for ensemble (using first model)...")
-try:
-    if len(train_df) > N_SHAP_SAMPLES:
-        shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
-    else:
-        shap_sample = train_df.copy()
-    # Convert categorical features to string for SHAP coloring
-    shap_sample_for_shap = shap_sample.copy()
-    for col in CATEGORICAL_FEATURES:
-        if col in shap_sample_for_shap.columns:
-            shap_sample_for_shap[col] = shap_sample_for_shap[col].astype(str)
-    explainer = shap.TreeExplainer(ensemble_models[0])
-    shap_values = explainer.shap_values(shap_sample_for_shap[FEATURES])
-    shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
-    shap_values_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_values.csv"), index=False)
-    np.save(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_values.npy"), shap_values)
-    shap_importance_df = pd.DataFrame({
-        'feature': FEATURES,
-        'mean_abs_shap': np.abs(shap_values).mean(axis=0)
-    }).sort_values('mean_abs_shap', ascending=False)
-    shap_importance_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_feature_importances.csv"), index=False)
-    plt.figure()
-    shap.summary_plot(shap_values, shap_sample[FEATURES], show=False, max_display=len(FEATURES))
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_summary_all_features.png"))
-    plt.close()
-    plt.figure(figsize=(10, 8))
-    shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
-    plt.gca().invert_yaxis()
-    plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
-    plt.title('Top 20 SHAP Feature Importances (Ensemble)')
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_top20_importance.png"))
-    plt.close()
-    for feat in shap_importance_df['feature']:
-        shap.dependence_plot(feat, shap_values, shap_sample[FEATURES], show=False)
-        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_dependence_{feat}.png"))
-        plt.close()
-    try:
-        shap_interaction_values = explainer.shap_interaction_values(shap_sample[FEATURES])
-        plt.figure()
-        shap.summary_plot(shap_interaction_values, shap_sample[FEATURES], show=False, max_display=20)
-        plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_interaction_summary.png"))
-        plt.close()
-    except Exception as e:
-        logging.warning(f"Could not generate SHAP interaction summary plot: {e}")
-    logging.info("SHAP analysis saved for ensemble.")
-except Exception as e:
-    logging.error(f"Error during SHAP analysis for ensemble: {e}")
+# logging.info("Calculating SHAP values for ensemble (using first model)...")
+# try:
+#     if len(train_df) > N_SHAP_SAMPLES:
+#         shap_sample = train_df.sample(n=N_SHAP_SAMPLES, random_state=SEED)
+#     else:
+#         shap_sample = train_df.copy()
+#     # Convert categorical features to string for SHAP coloring
+#     shap_sample_for_shap = shap_sample.copy()
+#     for col in CATEGORICAL_FEATURES:
+#         if col in shap_sample_for_shap.columns:
+#             shap_sample_for_shap[col] = shap_sample_for_shap[col].astype(str)
+#     explainer = shap.TreeExplainer(ensemble_models[0])
+#     shap_values = explainer.shap_values(shap_sample_for_shap[FEATURES])
+#     shap_values_df = pd.DataFrame(shap_values, columns=FEATURES)
+#     shap_values_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_values.csv"), index=False)
+#     np.save(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_values.npy"), shap_values)
+#     shap_importance_df = pd.DataFrame({
+#         'feature': FEATURES,
+#         'mean_abs_shap': np.abs(shap_values).mean(axis=0)
+#     }).sort_values('mean_abs_shap', ascending=False)
+#     shap_importance_df.to_csv(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_feature_importances.csv"), index=False)
+#     plt.figure()
+#     shap.summary_plot(shap_values, shap_sample[FEATURES], show=False, max_display=len(FEATURES))
+#     plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_summary_all_features.png"))
+#     plt.close()
+#     plt.figure(figsize=(10, 8))
+#     shap_importance_df.head(20).plot(kind='barh', x='feature', y='mean_abs_shap', legend=False, figsize=(10, 8))
+#     plt.gca().invert_yaxis()
+#     plt.xlabel('Mean |SHAP value| (Average impact on model output magnitude)')
+#     plt.title('Top 20 SHAP Feature Importances (Ensemble)')
+#     plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_top20_importance.png"))
+#     plt.close()
+#     for feat in shap_importance_df['feature']:
+#         shap.dependence_plot(feat, shap_values, shap_sample[FEATURES], show=False)
+#         plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_dependence_{feat}.png"))
+#         plt.close()
+#     try:
+#         shap_interaction_values = explainer.shap_interaction_values(shap_sample[FEATURES])
+#         plt.figure()
+#         shap.summary_plot(shap_interaction_values, shap_sample[FEATURES], show=False, max_display=20)
+#         plt.savefig(os.path.join(OUTPUT_DIRECTORY, f"{SHAP_FILE_PREFIX}_final_optuna_ensemble_interaction_summary.png"))
+#         plt.close()
+#     except Exception as e:
+#         logging.warning(f"Could not generate SHAP interaction summary plot: {e}")
+#     logging.info("SHAP analysis saved for ensemble.")
+# except Exception as e:
+#     logging.error(f"Error during SHAP analysis for ensemble: {e}")
 
-# --- Validation Plot (using recursive predictions) ---
-logging.info("Generating validation plot (using recursive predictions)...")
-try:
-    valid_preds_recursive = recursive_predict(
-        ensemble_models[0], train_split_df, valid_df, FEATURES, weekofyear_means, month_means
-    )
-    valid_rmsle_recursive = rmsle(valid_df[TARGET].values, valid_preds_recursive.loc[valid_df['id']].values)
-    plt.figure(figsize=(15, 6))
-    plt.scatter(valid_df[TARGET], valid_preds_recursive.loc[valid_df['id']], alpha=0.5, s=10)
-    plt.plot([valid_df[TARGET].min(), valid_df[TARGET].max()], [valid_df[TARGET].min(), valid_df[TARGET].max()], 'r--', lw=2, label='Ideal')
-    plt.xlabel("Actual Orders (Validation Set)")
-    plt.ylabel("Predicted Orders (Validation Set)")
-    plt.title(f"Actual vs. Predicted Orders (Validation Set, Recursive) - RMSLE: {valid_rmsle_recursive:.4f}")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted_ensemble_recursive.png"))
-    plt.close()
-    logging.info("Validation plot (recursive) saved.")
-except Exception as e:
-    logging.error(f"Error during plotting (recursive): {e}")
+# # --- Validation Plot (using recursive predictions) ---
+# logging.info("Generating validation plot (using recursive predictions)...")
+# try:
+#     valid_preds_recursive = recursive_predict(
+#         ensemble_models[0], train_split_df, valid_df, FEATURES, weekofyear_means, month_means
+#     )
+#     valid_rmsle_recursive = rmsle(valid_df[TARGET].values, valid_preds_recursive.loc[valid_df['id']].values)
+#     plt.figure(figsize=(15, 6))
+#     plt.scatter(valid_df[TARGET], valid_preds_recursive.loc[valid_df['id']], alpha=0.5, s=10)
+#     plt.plot([valid_df[TARGET].min(), valid_df[TARGET].max()], [valid_df[TARGET].min(), valid_df[TARGET].max()], 'r--', lw=2, label='Ideal')
+#     plt.xlabel("Actual Orders (Validation Set)")
+#     plt.ylabel("Predicted Orders (Validation Set)")
+#     plt.title(f"Actual vs. Predicted Orders (Validation Set, Recursive) - RMSLE: {valid_rmsle_recursive:.4f}")
+#     plt.legend()
+#     plt.grid(True)
+#     plt.savefig(os.path.join(OUTPUT_DIRECTORY, "validation_actual_vs_predicted_ensemble_recursive.png"))
+#     plt.close()
+#     logging.info("Validation plot (recursive) saved.")
+# except Exception as e:
+#     logging.error(f"Error during plotting (recursive): {e}")
 
-logging.info("All tasks completed.")
+# logging.info("All tasks completed.")
