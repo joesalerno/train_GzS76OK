@@ -32,7 +32,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 1 # Number of Optuna trials (increased for better search)
+OPTUNA_TRIALS = 5 # Number of Optuna trials (increased for better search)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -614,40 +614,42 @@ def multi_seed_overfitting_patience_analysis(train_df, valid_df, FEATURES, TARGE
 #         yield train_idx, val_idx
 
 
-# --- Custom GroupTimeSeriesSplit ---
-class GroupTimeSeriesSplit:
+
+# --- Rolling Window GroupTimeSeriesSplit ---
+class RollingGroupTimeSeriesSplit:
     """
-    Optimized cross-validator for time series data with non-overlapping groups.
-    Precomputes group-to-indices mapping for faster splits.
-    Each group appears in only one validation fold, and time order is respected.
+    Rolling window cross-validator for time series data with group awareness.
+    For each split, the training set is a rolling window of train_window unique weeks,
+    and the validation set is the next val_window unique weeks.
+    Groups are respected (e.g., center_id, meal_id).
+    No gap is used between train and validation.
     """
-    def __init__(self, n_splits=5):
+    def __init__(self, n_splits=3, train_window=20, val_window=4, week_col='week'):
         self.n_splits = n_splits
+        self.train_window = train_window
+        self.val_window = val_window
+        self.week_col = week_col
 
     def split(self, X, y=None, groups=None):
         if groups is None:
-            raise ValueError("Group labels must be provided for GroupTimeSeriesSplit.")
-        groups = pd.Series(groups).reset_index(drop=True)
-        # Precompute group to row indices mapping
-        group_to_indices = {}
-        for idx, group in enumerate(groups):
-            group_to_indices.setdefault(group, []).append(idx)
-        unique_groups = list(group_to_indices.keys())
-        group_folds = np.array_split(unique_groups, self.n_splits)
-        for fold_groups in group_folds:
-            val_indices = []
-            for g in fold_groups:
-                val_indices.extend(group_to_indices[g])
-            val_indices = np.array(val_indices)
-            train_groups = set(unique_groups) - set(fold_groups)
-            train_indices = []
-            for g in train_groups:
-                train_indices.extend(group_to_indices[g])
-            train_indices = np.array(train_indices)
-            # Sort indices by time if possible
-            if hasattr(X, 'iloc') and 'week' in X.columns:
-                train_indices = train_indices[np.argsort(X.iloc[train_indices]['week'].values)]
-                val_indices = val_indices[np.argsort(X.iloc[val_indices]['week'].values)]
+            raise ValueError("Group labels must be provided for RollingGroupTimeSeriesSplit.")
+        weeks = np.sort(X[self.week_col].unique())
+        total_weeks = len(weeks)
+        max_start = total_weeks - self.train_window - self.val_window + 1
+        if self.n_splits > max_start:
+            raise ValueError(f"Not enough weeks for {self.n_splits} splits with train_window={self.train_window} and val_window={self.val_window}.")
+        for i in range(self.n_splits):
+            train_start = i * (max_start // self.n_splits)
+            train_end = train_start + self.train_window
+            val_start = train_end
+            val_end = val_start + self.val_window
+            train_weeks = weeks[train_start:train_end]
+            val_weeks = weeks[val_start:val_end]
+            train_mask = X[self.week_col].isin(train_weeks)
+            val_mask = X[self.week_col].isin(val_weeks)
+            # Respect groups: only include indices where group is not missing
+            train_indices = np.where(train_mask & pd.notnull(groups))[0]
+            val_indices = np.where(val_mask & pd.notnull(groups))[0]
             yield train_indices, val_indices
 
 
@@ -969,10 +971,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial):
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
     if len(selected_features) < 10:
         return float('inf')
-    gtscv = GroupTimeSeriesSplit(n_splits=3)
+    # Use rolling window group time series split
+    rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
     scores = []
-    for train_idx, valid_idx in gtscv.split(train_split_df, groups=groups):
+    for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
         model = LGBMRegressor(**params)
         model.fit(
                 train_split_df.iloc[train_idx][selected_features],
