@@ -407,7 +407,7 @@ FROZEN_FEATURES_FOR_INTERACTIONS = [
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
 MAX_INTERACTION_ORDER = min(5, len(FROZEN_FEATURES_FOR_INTERACTIONS))
-MAX_INTERACTIONS_PER_ORDER = {2: 10, 3: 8, 4: 4, 5: 3}
+MAX_INTERACTIONS_PER_ORDER = {2: 3, 3: 2, 4: 1, 5: 0}
 ALL_COMBOS_STR = {}
 
 for order in range(2, MAX_INTERACTION_ORDER + 1):
