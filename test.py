@@ -16,7 +16,7 @@ from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, Gro
 from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
 from optuna.integration import LightGBMPruningCallback
 from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
-from optuna.samplers import NSGAIISampler
+# from optuna.samplers import NSGAIISampler
 import shap
 
 import re
@@ -401,12 +401,14 @@ class RollingGroupTimeSeriesSplit:
 
 # --- Freeze eligible features for Optuna interaction search ---
 FROZEN_FEATURES_FOR_INTERACTIONS = [
-    'checkout_price', 'base_price', 'discount', 'discount_pct', 'price_diff',
+    'checkout_price', 'base_price', 'homepage_featured', 'emailer_for_promotion',
+    'discount', 'discount_pct', 'price_diff',
     'center_orders_mean', 'meal_orders_mean',
+    'mean_orders_by_weekofyear', 'mean_orders_by_month'
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
-MAX_INTERACTION_ORDER = min(4, len(FROZEN_FEATURES_FOR_INTERACTIONS))
-MAX_INTERACTIONS_PER_ORDER = {2: 5, 3: 3, 4: 2, 5: 2}
+MAX_INTERACTION_ORDER = min(5, len(FROZEN_FEATURES_FOR_INTERACTIONS))
+MAX_INTERACTIONS_PER_ORDER = {2: 10, 3: 8, 4: 4, 5: 3}
 ALL_COMBOS_STR = {}
 
 for order in range(2, MAX_INTERACTION_ORDER + 1):
@@ -466,12 +468,19 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
 
+
+    # --- Robust dynamic feature interaction logic ---
     interaction_features = []
     new_interaction_cols = {}
     used_interactions = set()
+    # Dynamically generate all pairwise and higher-order products from eligible features
+    # (no single features, only interactions)
+    eligible = FROZEN_FEATURES_FOR_INTERACTIONS.copy()
+    
+    # Only allow up to 5th order, but prefer 2nd/3rd order
     for order in range(2, MAX_INTERACTION_ORDER + 1):
-        # Use only the precomputed, static list of strings
-        all_combos_str = ALL_COMBOS_STR[order]
+        combos = list(combinations(eligible, order))
+        all_combos_str = ["|".join(str(f) for f in combo) for combo in combos]
         max_this_order = min(MAX_INTERACTIONS_PER_ORDER.get(order, 1), len(all_combos_str))
         n_this_order = trial.suggest_int(f"n_{order}th_order", 0, max_this_order) if max_this_order > 0 else 0
         for i in range(n_this_order):
@@ -625,6 +634,7 @@ print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
 
 # Extract best features and params, but handle missing best_trial gracefully
 if feature_hyperparam_study.best_trial is None:
+
     logging.warning("No completed Optuna trial found. Skipping feature/param extraction.")
     SELECTED_FEATURES = FEATURES.copy()
     best_params = final_params.copy()
@@ -637,13 +647,25 @@ else:
         best_trial = feature_hyperparam_study.best_trial
     best_mask = [best_trial.params.get(f, False) for f in FEATURES]
     SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
-    best_params = {k: v for k, v in best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
+    # --- Add selected interaction features from best_trial ---
+    interaction_features = []
+    for k, v in best_trial.params.items():
+        if k.startswith('inter_') and v is not None:
+            # v is the combo string, e.g. 'discount_pct|price_diff|meal_orders_mean'
+            combo = v.split('|')
+            new_col = '_prod_'.join(combo)
+            interaction_features.append(new_col)
+    # Add only unique and not already present
+    for f in interaction_features:
+        if f not in SELECTED_FEATURES:
+            SELECTED_FEATURES.append(f)
+    best_params = {k: v for k, v in best_trial.params.items() if k not in FEATURES and not k.endswith('_pair') and not k.startswith('inter_')}
     logging.info(f"Optuna-selected params: {best_params}")
     logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
     if best_params.get('boosting_type') == 'goss':
         best_params['bagging_fraction'] = 1.0
         best_params['bagging_freq'] = 0
-    selected_pairs = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k.endswith('_pair')}
+    selected_pairs = {k: v for k, v in best_trial.params.items() if k.endswith('_pair')}
     # Add both features from each selected cyclical pair
     for pair_name, is_selected in selected_pairs.items():
         if is_selected:
@@ -658,6 +680,27 @@ else:
                     break
     logging.info(f"Optuna-selected params: {best_params}")
     logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
+
+# --- Ensure all dynamic interaction features exist in train/valid/test DataFrames ---
+def ensure_interaction_features(df, feature_names):
+    for f in feature_names:
+        if '_prod_' in f and f not in df.columns:
+            parts = f.split('_prod_')
+            # Defensive: only create if all base features exist
+            if all(p in df.columns for p in parts):
+                col_val = df[parts[0]]
+                for p in parts[1:]:
+                    col_val = col_val * df[p]
+                df[f] = col_val
+            else:
+                # If any part is missing, fill with zeros (fail-safe)
+                df[f] = 0
+    return df
+
+# Apply to all relevant DataFrames
+train_df = ensure_interaction_features(train_df, SELECTED_FEATURES)
+valid_df = ensure_interaction_features(valid_df, SELECTED_FEATURES)
+test_df = ensure_interaction_features(test_df, SELECTED_FEATURES)
 
 # Use SELECTED_FEATURES for final model and ensemble
 FEATURES = SELECTED_FEATURES
