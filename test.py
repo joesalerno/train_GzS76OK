@@ -6,7 +6,6 @@ import numpy as np
 from math import pi
 import matplotlib
 import matplotlib.pyplot as plt
-matplotlib.use('Agg')
 
 from lightgbm import LGBMRegressor
 import lightgbm as lgb  # Added for early stopping callback
@@ -16,22 +15,17 @@ from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, Gro
 from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
 from optuna.integration import LightGBMPruningCallback
 from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
-# from optuna.samplers import NSGAIISampler
+from optuna.samplers import NSGAIISampler, TPESampler
 import shap
 
 import re
 import os
-OUTPUT_DIRECTORY = "output"
-os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
 from functools import partial
 from itertools import combinations
-from collections import OrderedDict
-import random
 import logging
-import csv
 from tqdm import tqdm
 
-
+OUTPUT_DIRECTORY = "output"
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
@@ -44,6 +38,8 @@ OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
+# OPTUNA_SAMPLER = "Default"
+OPTUNA_SAMPLER = "NSGAIISampler"
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
@@ -51,6 +47,9 @@ OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
 N_SHAP_SAMPLES = 2000
+matplotlib.use('Agg')
+
+os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -511,6 +510,16 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
     scores = []
+    if OPTUNA_SAMPLER == "NSGAIISampler":
+        callbacks = [
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
+        ]  # No pruning callback
+    else:
+        callbacks = [
+            LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
+        ]
+
     for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
         model = LGBMRegressor(**params)
         model.fit(
@@ -521,10 +530,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
                 (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
             ],
             eval_metric=rmsle_lgbm,
-            callbacks=[
-                LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
-                early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
-            ]
+            callbacks=callbacks
         )
         y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
         score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred)
@@ -587,20 +593,39 @@ class TqdmOptunaCallback:
 
 # Create the study 
 optuna_storage = OPTUNA_DB
+
+if OPTUNA_SAMPLER == "TPESampler":
+    sampler = NSGAIISampler(
+            seed=SEED,
+            population_size=POPULATION_SIZE,
+            crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
+            crossover_prob=0.9,
+            swapping_prob=0.5,
+            # mutation_prob=mutation_prob
+    )
+    pruner = optuna.pruners.NopPruner()
+else:
+    sampler = optuna.samplers.TPESampler(
+        seed=SEED,
+        # n_startup_trials=5,
+        # n_ehvi_candidates=100,
+        # prior_weight=0.5,
+        # Use a smaller number of candidates for faster convergence
+        # n_ehvi_candidates=10,
+        # Use a smaller number of initial trials for faster convergence
+        # n_startup_trials=5,
+        # Use a smaller number of initial trials for faster convergence
+        # n_startup_trials=5,
+    )
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=N_WARMUP_STEPS)
+
 feature_hyperparam_study = optuna.create_study(
     direction="minimize",
-    pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=N_WARMUP_STEPS),  
+    pruner=pruner,
     study_name=OPTUNA_STUDY_NAME,
     storage=optuna_storage,
     load_if_exists=True,
-    # sampler=NSGAIISampler(
-    #     seed=SEED,
-    #     population_size=POPULATION_SIZE,
-    #     crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
-    #     crossover_prob=0.9,
-    #     swapping_prob=0.5,
-    #     # mutation_prob=mutation_prob
-    # )
+    sampler=sampler
 )
 
 # Pass the study to the callback so it can initialize best_value/best_trial
