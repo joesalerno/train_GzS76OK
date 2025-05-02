@@ -1,3 +1,6 @@
+import plotext as pltx  # For live ASCII plotting in the console
+
+
 import warnings
 warnings.filterwarnings("ignore", message="The reported value is ignored because this `step` .* is already reported.")
 
@@ -38,8 +41,8 @@ OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
-OPTUNA_SAMPLER = "Default"
-#OPTUNA_SAMPLER = "NSGAIISampler"
+#OPTUNA_SAMPLER = "Default"
+OPTUNA_SAMPLER = "NSGAIISampler"
 PRUNING_ENABLED = False # Enable Optuna pruning
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
@@ -425,25 +428,25 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
     if boosting_type != 'goss':
         bagging_fraction = trial.suggest_float('bagging_fraction', 0.8, 1.0)  # ↑ Min value for more regularization
-        bagging_freq = trial.suggest_int('bagging_freq', 1, 7)
+        bagging_freq = trial.suggest_int('bagging_freq', 0, 10)
     else:
         bagging_fraction = 1.0
         bagging_freq = 0
     params = {
-        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),  # Lower for less overfit
-        'num_leaves': trial.suggest_int('num_leaves', 4, 24),  # Lower for less complexity
-        'max_depth': trial.suggest_int('max_depth', 2, 5),     # Lower for less complexity
-        'feature_fraction': trial.suggest_float('feature_fraction', 0.7, 1.0),  # ↑ Min value
+        'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.2, log=True), # Lower for less overfit
+        'num_leaves': trial.suggest_int('num_leaves', 4, 128), # Lower for less complexity
+        'max_depth': trial.suggest_int('max_depth', 2, 12),    # Lower for less complexity
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.3, 1.0),  # ↑ Min value
         'bagging_fraction': bagging_fraction,
         'bagging_freq': bagging_freq,
-        'min_child_samples': trial.suggest_int('min_child_samples', 50, 400),  # ↑ Min value
-        'lambda_l1': trial.suggest_float('lambda_l1', 5.0, 30.0, log=True),    # ↑ Min value
-        'lambda_l2': trial.suggest_float('lambda_l2', 1.0, 30.0, log=True),    # ↑ Min value
-        'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
-        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 50, 400),    # ↑ Min value
-        'subsample_for_bin': trial.suggest_int('subsample_for_bin', 50000, 300000),
+        'min_child_samples': trial.suggest_int('min_child_samples', 10, 1000), # ↑ Min value
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 100.0, log=True), # ↑ Min value, must be >0 for log
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 100.0, log=True), # ↑ Min value, must be >0 for log
+        'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 5.0), 
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 1000), # ↑ Min value
+        'subsample_for_bin': trial.suggest_int('subsample_for_bin', 20000, 500000),
         'boosting_type': boosting_type,
-        'max_bin': trial.suggest_int('max_bin', 68, 256),  # Lower for regularization
+        'max_bin': trial.suggest_int('max_bin', 32, 512), # Lower for regularization
         'objective': 'regression_l1',
         'n_estimators': 500,
         'seed': SEED,
@@ -468,7 +471,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
 
-
     # --- Robust dynamic feature interaction logic ---
     interaction_features = []
     new_interaction_cols = {}
@@ -476,8 +478,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Dynamically generate all pairwise and higher-order products from eligible features
     # (no single features, only interactions)
     eligible = FROZEN_FEATURES_FOR_INTERACTIONS.copy()
-    
-    # Only allow up to 5th order, but prefer 2nd/3rd order
     for order in range(2, MAX_INTERACTION_ORDER + 1):
         combos = list(combinations(eligible, order))
         all_combos_str = ["|".join(str(f) for f in combo) for combo in combos]
@@ -491,7 +491,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             combo = combo_str.split("|")
             new_col = "_prod_".join(combo)
             if new_col not in train_split_df.columns and new_col not in new_interaction_cols:
-                # Multiply all features in combo
                 col_val = train_split_df[combo[0]]
                 for f in combo[1:]:
                     col_val = col_val * train_split_df[f]
@@ -506,12 +505,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     if len(selected_features) < 10:
         logging.warning(f"Optuna selected {len(selected_features)} features, which is less than 10. This may lead to overfitting.")
         return optuna.TrialPruned()
-        # raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
 
     # Use rolling window group time series split
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
-    scores = []
+    train_scores, valid_scores = [], []
     if not PRUNING_ENABLED or OPTUNA_SAMPLER == "NSGAIISampler":
         callbacks = [
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
@@ -534,14 +532,47 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             eval_metric=rmsle_lgbm,
             callbacks=callbacks
         )
-        y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
-        score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred)
-        if (score is None or np.isnan(score) or np.isinf(score)):
-            logging.warning(f"Optuna trial {trial.number} produced invalid score: {score}.")
-            return optuna.TrialPruned()
-            # raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
-        scores.append(score)
-    return np.mean(scores)
+        y_train_pred = model.predict(train_split_df.iloc[train_idx][selected_features])
+        y_valid_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
+        train_score = rmsle(train_split_df.iloc[train_idx][TARGET], y_train_pred)
+        valid_score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_valid_pred)
+        train_scores.append(train_score)
+        valid_scores.append(valid_score)
+
+    mean_train = np.mean(train_scores)
+    mean_valid = np.mean(valid_scores)
+    generalization_gap = mean_valid - mean_train
+
+    # --- Penalty terms as separate objectives ---
+    gap_penalty = max(0, generalization_gap) * 2.0  # Weight can be tuned. Higher weight = more penalty for overfitting
+    complexity_penalty = 0.01 * len(selected_features)
+    complexity_penalty += 0.01 * params['num_leaves']
+    complexity_penalty += 0.01 * (params['max_depth'] if params['max_depth'] > 0 else 0)
+    reg_reward = 0.01 * (params['lambda_l1'] + params['lambda_l2'])
+
+    # Store metrics for logging in callback
+    trial.set_user_attr('mean_train', float(mean_train))
+    trial.set_user_attr('mean_valid', float(mean_valid))
+    trial.set_user_attr('generalization_gap', float(generalization_gap))
+    trial.set_user_attr('gap_penalty', float(gap_penalty))
+    trial.set_user_attr('complexity_penalty', float(complexity_penalty))
+    trial.set_user_attr('reg_reward', float(reg_reward))
+
+    # Multi-objective: minimize mean_valid, gap_penalty, complexity_penalty, maximize reg_reward (so minimize -reg_reward)
+    # If any objective is nan/inf, prune
+    objectives = [mean_valid, gap_penalty, complexity_penalty, -reg_reward]
+    if any(np.isnan(obj) or np.isinf(obj) for obj in objectives):
+        logging.warning(f"Optuna trial {trial.number} produced invalid objectives: {objectives}.")
+        if isinstance(directions, list) and len(directions) > 1:
+            return tuple([float('inf')] * len(directions))
+        else:
+            return float('inf')
+
+    # Return correct type for single- or multi-objective
+    if isinstance(directions, list) and len(directions) > 1:
+        return tuple(objectives)
+    else:
+        return objectives[0]
 
 logging.info("Starting Optuna feature+hyperparam selection...")
 
@@ -550,72 +581,152 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 class TqdmOptunaCallback:
     def __init__(self, n_trials, study=None, print_every=1):
-        self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
+        self.n_trials = n_trials
         self.print_every = print_every
-        # Initialize best_value and best_trial from study if available
-        if study is not None:
-            try:
-                if study.best_trial is not None and study.best_trial.value is not None:
-                    self.best_value = study.best_trial.value
-                    self.best_trial = study.best_trial.number
-                else:
-                    self.best_value = float('inf')
-                    self.best_trial = None
-            except Exception:
-                self.best_value = float('inf')
-                self.best_trial = None
-        else:
-            self.best_value = float('inf')
-            self.best_trial = None
+        self.study = study
+        self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
+
     def __call__(self, study, trial):
         self.pbar.update(1)
-        msg = None
-        # Count number of features selected (if available)
         n_features = sum([v for k, v in trial.params.items() if isinstance(v, bool) and v])
-        # Show only main hyperparameters (not feature selectors)
-        main_params = {k: v for k, v in trial.params.items() if not isinstance(v, bool) and not k.endswith('_pair')}
-        def fmt_val(val):
-            if isinstance(val, float):
-                return f"{val:.6f}"
-            return str(val)
-        params_str = ', '.join(f"{k}={fmt_val(v)}" for k, v in list(main_params.items())[:5])
-        # Handle None trial.value gracefully
-        if trial.value is not None and trial.value < self.best_value:
-            self.best_value = trial.value
-            self.best_trial = trial.number
-            # ANSI green for new best
-            msg = f"\033[92mTrial {trial.number} finished with value: {trial.value:.5f} | BEST! {self.best_value:.5f}\033[0m | Features: {n_features} | Params: {params_str}"
-        elif trial.number % self.print_every == 0:
-            val_str = f"{trial.value:.5f}" if trial.value is not None else "None"
-            best_str = f"{self.best_value:.5f}" if self.best_value is not None else "None"
-            msg = f"Trial {trial.number} finished with value: {val_str} | Best: {best_str} | Features: {n_features} | Params: {params_str}"
-        if msg:
-            tqdm.write(msg)
+        num_leaves = trial.params.get('num_leaves', None)
+        max_depth = trial.params.get('max_depth', None)
+        lambda_l1 = trial.params.get('lambda_l1', None)
+        lambda_l2 = trial.params.get('lambda_l2', None)
+        mean_train = trial.user_attrs.get('mean_train', None)
+        mean_valid = trial.user_attrs.get('mean_valid', None)
+        generalization_gap = trial.user_attrs.get('generalization_gap', None)
+        msg = (
+            f"Trial {trial.number} | mean_valid: {mean_valid} | gap: {generalization_gap} | "
+            f"Features: {n_features} | num_leaves: {num_leaves} | max_depth: {max_depth} | "
+            f"lambda_l1: {lambda_l1} | lambda_l2: {lambda_l2}"
+        )
+        tqdm.write(msg)
+
+        # Live ASCII plot using plotext, with progress bar handling
+        if trial.number % self.print_every == 0:
+            self.pbar.close()  # Close progress bar before plotting
+            self.live_plot_objectives(study.trials)
+            self.pbar = tqdm(total=self.n_trials, desc="Optuna Trials", position=0, leave=True)
+            self.pbar.n = trial.number + 1  # Restore progress
+            self.pbar.refresh()
+
+    def live_plot_objectives(self, trials):
+        pltx.clf()
+        trial_nums = []
+        mean_valids = []
+        gap_penalties = []
+        complexity_penalties = []
+        reg_rewards = []
+        for t in trials:
+            if t.values is not None and len(t.values) >= 4:
+                trial_nums.append(t.number)
+                mean_valids.append(t.values[0])
+                gap_penalties.append(t.values[1])
+                complexity_penalties.append(t.values[2])
+                reg_rewards.append(-t.values[3])  # Negated because you minimize -reg_reward
+        if trial_nums:
+            # Use darker, less bright colors for plotext
+            pltx.plot(trial_nums, mean_valids, label='mean_valid', color='cyan')
+            pltx.plot(trial_nums, gap_penalties, label='gap_penalty', color='magenta')
+            pltx.plot(trial_nums, complexity_penalties, label='complexity_penalty', color='blue')
+            pltx.plot(trial_nums, reg_rewards, label='reg_reward', color='green')
+            pltx.title('Optuna Objectives (Live)')
+            pltx.xlabel('Trial')
+            pltx.ylabel('Value')
+            pltx.canvas_color('black')
+            pltx.axes_color('black')
+            pltx.ticks_color('grey')
+            # pltx.grid_color('grey')
+            pltx.grid(True)
+            pltx.show()
+
     def close(self):
         self.pbar.close()
 
+# class TqdmOptunaCallback:
+#     def __init__(self, n_trials, study=None, print_every=1):
+#         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
+#         self.print_every = print_every
+#         # Initialize best_value and best_trial from study if available
+#         if study is not None:
+#             try:
+#                 if study.best_trial is not None and study.best_trial.value is not None:
+#                     self.best_value = study.best_trial.value
+#                     self.best_trial = study.best_trial.number
+#                 else:
+#                     self.best_value = float('inf')
+#                     self.best_trial = None
+#             except Exception:
+#                 self.best_value = float('inf')
+#                 self.best_trial = None
+#         else:
+#             self.best_value = float('inf')
+#             self.best_trial = None
+#     def __call__(self, study, trial):
+#         self.pbar.update(1)
+#         # Extract best trial info
+#         best_trial = study.best_trial if study.best_trial is not None else None
+#         best_trial_num = best_trial.number if best_trial is not None else None
+#         best_trial_val = best_trial.value if best_trial is not None else None
+
+#         # Extract this trial's info
+#         trial_num = trial.number
+#         trial_val = trial.value
+#         params = trial.params
+
+#         # Extract scores and gap from trial's user_attrs (set in objective)
+#         mean_train = trial.user_attrs.get('mean_train', None)
+#         mean_valid = trial.user_attrs.get('mean_valid', None)
+#         generalization_gap = trial.user_attrs.get('generalization_gap', None)
+
+#         # Number of selected features
+#         n_features = sum([v for k, v in params.items() if isinstance(v, bool) and v])
+
+#         # Main hyperparameters
+#         num_leaves = params.get('num_leaves', None)
+#         max_depth = params.get('max_depth', None)
+#         lambda_l1 = params.get('lambda_l1', None)
+#         lambda_l2 = params.get('lambda_l2', None)
+
+#         # Format values for pretty printing
+#         def fmt(val, prec=5):
+#             if val is None:
+#                 return 'None'
+#             if isinstance(val, float):
+#                 return f"{val:.{prec}f}"
+#             return str(val)
+
+#         msg = (
+#             f"Trial {trial_num} | Obj: {fmt(trial_val)} | "
+#             f"Train: {fmt(mean_train)} | Valid: {fmt(mean_valid)} | Gap: {fmt(generalization_gap)} | "
+#             f"Features: {n_features} | num_leaves: {num_leaves} | max_depth: {max_depth} | "
+#             f"lambda_l1: {fmt(lambda_l1,3)} | lambda_l2: {fmt(lambda_l2,3)} | "
+#             f"Best so far: #{best_trial_num} ({fmt(best_trial_val)})"
+#         )
+#         tqdm.write(msg)
+#     def close(self):
+#         self.pbar.close()
+
 # Create the study 
+
 optuna_storage = OPTUNA_DB
 
-if OPTUNA_SAMPLER == "TPESampler":
+if OPTUNA_SAMPLER == "NSGAIISampler":
     sampler = NSGAIISampler(
-            seed=SEED,
-            population_size=POPULATION_SIZE,
-            crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
-            crossover_prob=0.9,
-            swapping_prob=0.5,
-            # mutation_prob=mutation_prob
+        seed=SEED,
+        population_size=POPULATION_SIZE,
+        crossover=UniformCrossover(),
+        crossover_prob=0.9,
+        swapping_prob=0.5,
     )
-    pruner = optuna.pruners.NopPruner()
+    pruner = optuna.pruners.NopPruner()  # Pruning not supported for multi-objective
+    directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
 else:
     sampler = optuna.samplers.TPESampler(
         seed=SEED,
-        # n_startup_trials=5,
-        # n_ehvi_candidates=100,
-        # prior_weight=0.5,
-        # n_ehvi_candidates=10,
-        # n_startup_trials=5,
     )
+    # For single-objective, you can use any of the objectives, e.g. mean_valid
     if PRUNING_ENABLED:
         pruner = optuna.pruners.MedianPruner(
             n_startup_trials=5,
@@ -625,9 +736,10 @@ else:
         )
     else:
         pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=N_WARMUP_STEPS)
+    directions = "minimize"  # Single-objective
 
 feature_hyperparam_study = optuna.create_study(
-    direction="minimize",
+    directions=directions,
     pruner=pruner,
     study_name=OPTUNA_STUDY_NAME,
     storage=optuna_storage,
@@ -658,23 +770,58 @@ optuna_callback.close()
 feature_hyperparam_study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
 
 # Diagnostic: Show all trial values and states after reload
+
+# Handle both single- and multi-objective studies
 df_trials = feature_hyperparam_study.trials_dataframe()
-print(df_trials[['number', 'value', 'state']].sort_values('value').head(20))
-print("Best value among COMPLETE trials:", df_trials[df_trials['state'] == 'COMPLETE']['value'].min())
-print("Best value among ALL trials:", df_trials['value'].min())
-print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
+value_cols = [col for col in df_trials.columns if col.startswith('values_')]
+if value_cols:
+    print(df_trials[['number'] + value_cols + ['state']].sort_values(value_cols[0]).head(20))
+    print("Best value_0 among COMPLETE trials:", df_trials[df_trials['state'] == 'COMPLETE'][value_cols[0]].min())
+    print("Best value_0 among ALL trials:", df_trials[value_cols[0]].min())
+    if hasattr(feature_hyperparam_study, 'best_trials') and feature_hyperparam_study.best_trials:
+        print(f"Final best value_0: {feature_hyperparam_study.best_trials[0].values[0]:.5f}")
+else:
+    print(df_trials[['number', 'value', 'state']].sort_values('value').head(20))
+    print("Best value among COMPLETE trials:", df_trials[df_trials['state'] == 'COMPLETE']['value'].min())
+    print("Best value among ALL trials:", df_trials['value'].min())
+    print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
 
 # Extract best features and params, but handle missing best_trial gracefully
 
 # --- Patch: Always use the best trial by value, regardless of state (COMPLETE or PRUNED) ---
-trials_with_value = [t for t in feature_hyperparam_study.get_trials(deepcopy=False) if t.value is not None]
+is_multi_objective = isinstance(feature_hyperparam_study.directions, list) and len(feature_hyperparam_study.directions) > 1
+
+# Use a weighted sum of all objectives for best trial selection (adjust weights as needed)
+# These weights should match the intent of your objective function.
+# For example, if you want to penalize overfitting more, increase the weight for gap_penalty, etc.
+# Already set and weighted in the objective function
+objective_weights = [1.0, 1.0, 1.0, 1.0]  # [mean_valid, gap_penalty, complexity_penalty, -reg_reward]
+def get_weighted_objective(trial):
+    if is_multi_objective and trial.values is not None:
+        # Defensive: Only use as many weights as there are objectives
+        n_obj = min(len(objective_weights), len(trial.values))
+        return sum(objective_weights[i] * trial.values[i] for i in range(n_obj))
+    elif not is_multi_objective and trial.value is not None:
+        return trial.value
+    else:
+        return float('inf')  # Exclude invalid trials
+
+trials_with_value = [
+    t for t in feature_hyperparam_study.get_trials(deepcopy=False)
+    if (
+        (t.values is not None and not any(pd.isnull(v) or np.isinf(v) for v in t.values)) if is_multi_objective
+        else (t.value is not None and not (pd.isnull(t.value) or np.isinf(t.value)))
+    )
+]
+
 if not trials_with_value:
     logging.warning("No Optuna trial with a value found. Skipping feature/param extraction.")
     SELECTED_FEATURES = FEATURES.copy()
     best_params = final_params.copy()
 else:
-    best_trial = min(trials_with_value, key=lambda t: t.value)
-    print(f"Best trial number: {best_trial.number}, value: {best_trial.value}, state: {best_trial.state}")
+    best_trial = min(trials_with_value, key=get_weighted_objective)
+    best_value = get_weighted_objective(best_trial)
+    print(f"Best trial number: {best_trial.number}, weighted value: {best_value}, state: {best_trial.state}")
     best_mask = [best_trial.params.get(f, False) for f in FEATURES]
     SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
     # --- Add selected interaction features from best_trial ---
@@ -760,6 +907,8 @@ def recursive_predict(model, train_df, predict_df, FEATURES, weekofyear_means=No
         history_df, _, _ = apply_feature_engineering(
             history_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means
         ) if weekofyear_means is not None and month_means is not None else apply_feature_engineering(history_df, is_train=False)
+        # Ensure dynamic interaction features are present
+        history_df = ensure_interaction_features(history_df, FEATURES)
         current_features = history_df.loc[current_week_mask, FEATURES]
         missing_features = [col for col in FEATURES if col not in current_features.columns]
         if missing_features:
