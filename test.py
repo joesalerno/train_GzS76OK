@@ -40,6 +40,7 @@ N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
 OPTUNA_SAMPLER = "Default"
 #OPTUNA_SAMPLER = "NSGAIISampler"
+PRUNING_ENABLED = False # Enable Optuna pruning
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
@@ -134,7 +135,7 @@ def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_tra
     df['mean_orders_by_month'] = df['month'].map(month_means)
     return df, weekofyear_means, month_means
 
-def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], windows=[3, 5, 10]):
+def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], windows=LAG_WEEKS):
     df_out = df.copy()
     group = df_out.groupby(GROUP_COLS, observed=False)
     for col in binary_cols:
@@ -150,7 +151,7 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     if is_train or 'num_orders' in df_out.columns:
         df_out = create_lag_rolling_features(df_out)
     df_out = create_other_features(df_out)
-    df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], [3, 5, 10])
+    df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], LAG_WEEKS)
     df_out = create_group_aggregates(df_out)
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
@@ -220,7 +221,7 @@ for w in [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]:
 
 # Add rolling means for binary features
 for col in ["emailer_for_promotion", "homepage_featured"]:
-    for w in [3, 5, 10]:
+    for w in LAG_WEEKS:
         mean_col = f"{col}_rolling_mean_{w}"
         if mean_col in train_df.columns and mean_col not in features_set:
             FEATURES.append(mean_col)
@@ -350,7 +351,7 @@ final_params = {
     'lambda_l1': 10.0,
     'lambda_l2': 10.0,
     'min_child_samples': 150,
-    'min_data_in_leaf': 150,
+    'min_data_in_leaf': 250,
     'num_leaves': 16,
     'max_depth': 4,
     'feature_fraction': 0.8,
@@ -406,8 +407,8 @@ FROZEN_FEATURES_FOR_INTERACTIONS = [
     'mean_orders_by_weekofyear', 'mean_orders_by_month'
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
-MAX_INTERACTION_ORDER = min(5, len(FROZEN_FEATURES_FOR_INTERACTIONS))
-MAX_INTERACTIONS_PER_ORDER = {2: 3, 3: 2, 4: 1, 5: 0}
+MAX_INTERACTION_ORDER = 2 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
+MAX_INTERACTIONS_PER_ORDER = {2: 3, 3: 2, 4: 0, 5: 0}
 ALL_COMBOS_STR = {}
 
 for order in range(2, MAX_INTERACTION_ORDER + 1):
@@ -430,13 +431,13 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         bagging_freq = 0
     params = {
         'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),  # Lower for less overfit
-        'num_leaves': trial.suggest_int('num_leaves', 4, 32),  # Lower for less complexity
-        'max_depth': trial.suggest_int('max_depth', 2, 6),     # Lower for less complexity
+        'num_leaves': trial.suggest_int('num_leaves', 4, 24),  # Lower for less complexity
+        'max_depth': trial.suggest_int('max_depth', 2, 5),     # Lower for less complexity
         'feature_fraction': trial.suggest_float('feature_fraction', 0.7, 1.0),  # ↑ Min value
         'bagging_fraction': bagging_fraction,
         'bagging_freq': bagging_freq,
         'min_child_samples': trial.suggest_int('min_child_samples', 50, 400),  # ↑ Min value
-        'lambda_l1': trial.suggest_float('lambda_l1', 1.0, 30.0, log=True),    # ↑ Min value
+        'lambda_l1': trial.suggest_float('lambda_l1', 5.0, 30.0, log=True),    # ↑ Min value
         'lambda_l2': trial.suggest_float('lambda_l2', 1.0, 30.0, log=True),    # ↑ Min value
         'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 1.0),
         'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 50, 400),    # ↑ Min value
@@ -502,7 +503,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
 
     # Ensure selected features are unique and not empty
     selected_features = list(dict.fromkeys(selected_features))
-    if len(selected_features) < 5:
+    if len(selected_features) < 10:
+        logging.warning(f"Optuna selected {len(selected_features)} features, which is less than 10. This may lead to overfitting.")
         return optuna.TrialPruned()
         # raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
 
@@ -510,14 +512,14 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
     scores = []
-    if OPTUNA_SAMPLER == "NSGAIISampler":
+    if not PRUNING_ENABLED or OPTUNA_SAMPLER == "NSGAIISampler":
         callbacks = [
-            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
         ]  # No pruning callback
     else:
         callbacks = [
             LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
-            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
         ]
 
     for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
@@ -535,6 +537,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
         score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred)
         if (score is None or np.isnan(score) or np.isinf(score)):
+            logging.warning(f"Optuna trial {trial.number} produced invalid score: {score}.")
             return optuna.TrialPruned()
             # raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
         scores.append(score)
@@ -610,14 +613,18 @@ else:
         # n_startup_trials=5,
         # n_ehvi_candidates=100,
         # prior_weight=0.5,
-        # Use a smaller number of candidates for faster convergence
         # n_ehvi_candidates=10,
-        # Use a smaller number of initial trials for faster convergence
-        # n_startup_trials=5,
-        # Use a smaller number of initial trials for faster convergence
         # n_startup_trials=5,
     )
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=N_WARMUP_STEPS)
+    if PRUNING_ENABLED:
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=5,
+            n_warmup_steps=N_WARMUP_STEPS,
+            n_min_trials=5,
+            interval_steps=1,
+        )
+    else:
+        pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=N_WARMUP_STEPS)
 
 feature_hyperparam_study = optuna.create_study(
     direction="minimize",
