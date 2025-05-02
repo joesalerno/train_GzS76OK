@@ -584,14 +584,14 @@ feature_hyperparam_study = optuna.create_study(
     study_name=OPTUNA_STUDY_NAME,
     storage=optuna_storage,
     load_if_exists=True,
-    sampler=NSGAIISampler(
-        seed=SEED,
-        population_size=POPULATION_SIZE,
-        crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
-        crossover_prob=0.9,
-        swapping_prob=0.5,
-        # mutation_prob=mutation_prob
-    )
+    # sampler=NSGAIISampler(
+    #     seed=SEED,
+    #     population_size=POPULATION_SIZE,
+    #     crossover=UniformCrossover(), # Use SBXCrossover for continuous, UniformCrossover for mixed/categorical
+    #     crossover_prob=0.9,
+    #     swapping_prob=0.5,
+    #     # mutation_prob=mutation_prob
+    # )
 )
 
 # Pass the study to the callback so it can initialize best_value/best_trial
