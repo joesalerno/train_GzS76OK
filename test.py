@@ -658,18 +658,16 @@ print("Best value among ALL trials:", df_trials['value'].min())
 print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
 
 # Extract best features and params, but handle missing best_trial gracefully
-if feature_hyperparam_study.best_trial is None:
 
-    logging.warning("No completed Optuna trial found. Skipping feature/param extraction.")
+# --- Patch: Always use the best trial by value, regardless of state (COMPLETE or PRUNED) ---
+trials_with_value = [t for t in feature_hyperparam_study.get_trials(deepcopy=False) if t.value is not None]
+if not trials_with_value:
+    logging.warning("No Optuna trial with a value found. Skipping feature/param extraction.")
     SELECTED_FEATURES = FEATURES.copy()
     best_params = final_params.copy()
 else:
-    # Defensive: get the best completed trial manually in case of interrupted run
-    trials = [t for t in feature_hyperparam_study.get_trials(deepcopy=False) if t.state == optuna.trial.TrialState.COMPLETE]
-    if trials:
-        best_trial = min(trials, key=lambda t: t.value)
-    else:
-        best_trial = feature_hyperparam_study.best_trial
+    best_trial = min(trials_with_value, key=lambda t: t.value)
+    print(f"Best trial number: {best_trial.number}, value: {best_trial.value}, state: {best_trial.state}")
     best_mask = [best_trial.params.get(f, False) for f in FEATURES]
     SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
     # --- Add selected interaction features from best_trial ---
