@@ -1,39 +1,35 @@
-import pandas as pd
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import re
-from functools import partial
-from collections import OrderedDict
-import random
-import os
-OUTPUT_DIRECTORY = "output"
-os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
-
-import matplotlib.pyplot as plt
-from lightgbm import LGBMRegressor
-import lightgbm as lgb  # Added for early stopping callback
-import optuna
-from optuna.integration import LightGBMPruningCallback
-from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
-from optuna.samplers import NSGAIISampler
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, GroupKFold
-from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
-import shap
-from tqdm import tqdm
-import logging
-import csv
-from itertools import combinations
-
-
 import warnings
 warnings.filterwarnings("ignore", message="The reported value is ignored because this `step` .* is already reported.")
 
+import pandas as pd
+import numpy as np
+from math import pi
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.use('Agg')
 
+from lightgbm import LGBMRegressor
+import lightgbm as lgb  # Added for early stopping callback
+import optuna
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, GroupKFold
+from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
+from optuna.integration import LightGBMPruningCallback
+from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
+from optuna.samplers import NSGAIISampler
+import shap
 
-
-
+import re
+import os
+OUTPUT_DIRECTORY = "output"
+os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
+from functools import partial
+from itertools import combinations
+from collections import OrderedDict
+import random
+import logging
+import csv
+from tqdm import tqdm
 
 
 DATA_PATH = "train.csv"
@@ -46,7 +42,7 @@ ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-N_WARMUP_STEPS = 30 # Warmup steps for Optuna pruning
+N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
@@ -86,7 +82,6 @@ if 'num_orders' not in test.columns:
 logging.info("Creating features...")
 GROUP_COLS = ["center_id", "meal_id"]
 
-from math import pi
 def create_temporal_features(df):
     df_out = df.copy()
     df_out["weekofyear"] = df_out["week"] % 52
@@ -128,22 +123,6 @@ def create_group_aggregates(df):
         df_out['category_orders_std'] = df_out.groupby('category', observed=False)['num_orders'].transform('std')
     return df_out
 
-# def create_selected_interaction_features(df):
-#     df_out = df.copy()
-#     if 'price_diff' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
-#         df_out['price_diff_x_emailer'] = df_out['price_diff'] * df_out['emailer_for_promotion']
-#     if 'price_diff' in df_out.columns and 'homepage_featured' in df_out.columns:
-#         df_out['price_diff_x_homepage'] = df_out['price_diff'] * df_out['homepage_featured']
-#     if 'discount_pct' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
-#         df_out['discount_pct_x_emailer'] = df_out['discount_pct'] * df_out['emailer_for_promotion']
-#     if 'discount_pct' in df_out.columns and 'homepage_featured' in df_out.columns:
-#         df_out['discount_pct_x_homepage'] = df_out['discount_pct'] * df_out['homepage_featured']
-#     if 'meal_orders_mean' in df_out.columns and 'discount_pct' in df_out.columns:
-#         df_out['meal_orders_mean_x_discount_pct'] = df_out['meal_orders_mean'] * df_out['discount_pct']
-#     if 'meal_orders_mean' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
-#         df_out['meal_orders_mean_x_emailer_for_promotion'] = df_out['meal_orders_mean'] * df_out['emailer_for_promotion']
-#     return df_out
-
 def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_train=True):
     df = df.copy()
     if is_train:
@@ -174,12 +153,10 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     df_out = create_other_features(df_out)
     df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], [3, 5, 10])
     df_out = create_group_aggregates(df_out)
-    # df_out = create_selected_interaction_features(df_out)
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
     lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
         "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_mean", "_std"
-        # "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear",
     ])]
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
     if cols_to_fill:
@@ -257,22 +234,6 @@ for prefix in ["center_orders_", "meal_orders_", "category_orders_"]:
             FEATURES.append(col)
             features_set.add(col)
 
-
-# Add selected interaction features
-# for col in [
-#     "price_diff_x_emailer", "price_diff_x_homepage", "discount_pct_x_emailer", "discount_pct_x_homepage",
-#     "meal_orders_mean_x_discount_pct", "meal_orders_mean_x_emailer_for_promotion"
-# ]:
-#     if col in train_df.columns and col not in features_set:
-#         FEATURES.append(col)
-#         features_set.add(col)
-
-# Add recency features
-# for col in ["weeks_since_last_emailer", "weeks_since_last_homepage"]:
-#     if col in train_df.columns and col not in features_set:
-#         FEATURES.append(col)
-#         features_set.add(col)
-
 # Remove one-hot columns for categoricals from FEATURES if present
 for prefix in ["category_", "cuisine_", "center_type_"]:
     FEATURES = [f for f in FEATURES if not f.startswith(prefix)]
@@ -286,6 +247,7 @@ for f in seasonality_features:
     if f in train_df.columns and f not in features_set:
         FEATURES.append(f)
         features_set.add(f)
+
 # Remove raw integer weekofyear/month if present
 for f in ['weekofyear', 'month']:
     if f in FEATURES:
@@ -317,25 +279,10 @@ def rmsle(y_true, y_pred):
     y_pred = np.array(y_pred).clip(0) # Ensure predictions are non-negative
     return np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
 
-def lgb_rmsle(y_true, y_pred):
-    """RMSLE metric for LightGBM"""
-    return 'rmsle', rmsle(y_true, y_pred), False # lower is better
-
-# # --- Custom LightGBM RMSLE metric for Optuna integration ---
-# def rmsle_lgbm(y_pred, dataset):
-#     """Custom RMSLE metric for LightGBM (Optuna callback compatible)"""
-#     y_true = dataset.get_label()
-#     y_pred = np.clip(y_pred, 0, None)
-#     rmsle_score = np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
-#     return 'rmsle', rmsle_score, False
-
 # --- Custom LightGBM RMSLE metric for sklearn API (LGBMRegressor) ---
 def rmsle_lgbm(y_true, y_pred):
-    """Custom RMSLE metric for LightGBM sklearn API (Optuna callback compatible)"""
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred).clip(0)
-    rmsle_score = np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
-    return 'rmsle', rmsle_score, False
+    """RMSLE metric for LightGBM"""
+    return 'rmsle', rmsle(y_true, y_pred), False # lower is better
 
 # --- Custom Early Stopping Callback with Overfitting Detection ---
 def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
@@ -382,11 +329,13 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
         if overfit_count[0] >= overfit_rounds:
             if verbose:
                 print(f"Stopping early due to overfitting at iteration {env.iteration}")
+            # return optuna.TrialPruned()
             raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
         # Standard early stopping
         if env.iteration - best_iter[0] >= stopping_rounds:
             if verbose:
                 print(f"Stopping early due to no improvement at iteration {env.iteration}")
+            # return optuna.TrialPruned()
             raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
     return _callback
 
@@ -410,243 +359,6 @@ final_params = {
     'bagging_freq': 3
 }
 
-# --- Empirical Overfitting Patience Analysis (run early) ---
-def analyze_overfitting_patience(train_df, valid_df, FEATURES, TARGET, params, max_rounds=300, plot_path=None):
-    """
-    Empirically analyze the longest consecutive streak where validation loss increases and training loss decreases.
-    Suggest a patience value for overfitting detection. Optionally plot loss curves.
-    Returns: (recommended_patience, train_loss, valid_loss)
-    """
-    params = params.copy()
-    n_estimators = params.pop('n_estimators', max_rounds)
-    model = LGBMRegressor(**params, n_estimators=n_estimators) 
-    model.fit(
-        train_df[FEATURES], train_df[TARGET],
-        eval_set=[(train_df[FEATURES], train_df[TARGET]), (valid_df[FEATURES], valid_df[TARGET])],
-        eval_metric='l1'
-    )
-    evals_result = model.evals_result_
-    keys = list(evals_result.keys())
-    if 'validation_0' in keys and 'validation_1' in keys:
-        train_loss = evals_result['validation_0']['l1']
-        valid_loss = evals_result['validation_1']['l1']
-    elif 'train' in keys and 'valid' in keys:
-        train_loss = evals_result['train']['l1']
-        valid_loss = evals_result['valid']['l1']
-    elif 'valid_0' in keys and 'valid_1' in keys:
-        train_loss = evals_result['valid_0']['l1']
-        valid_loss = evals_result['valid_1']['l1']
-    else:
-        print(f"Unexpected evals_result_ keys: {keys}")
-        raise ValueError(f"Could not find expected keys in evals_result_: {keys}")
-    streak = 0
-    max_streak = 0
-    for i in range(1, len(train_loss)):
-        if valid_loss[i] > valid_loss[i-1] and train_loss[i] < train_loss[i-1]:
-            streak += 1
-            max_streak = max(max_streak, streak)
-        else:
-            streak = 0
-    print(f"Longest overfitting streak: {max_streak} rounds.")
-    recommended_patience = max(5, max_streak + 2)
-    print(f"Recommended overfitting patience: {recommended_patience} rounds.")
-    # Plot loss curves if requested
-    if plot_path:
-        plt.figure(figsize=(8,5))
-        plt.plot(train_loss, label='Train L1 Loss')
-        plt.plot(valid_loss, label='Valid L1 Loss')
-        plt.xlabel('Boosting Round')
-        plt.ylabel('L1 Loss')
-        plt.title('Train/Validation Loss Curve')
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(plot_path)
-        plt.close()
-    return recommended_patience, train_loss, valid_loss
-
-
-def multi_seed_overfitting_patience_analysis(train_df, valid_df, FEATURES, TARGET, params, seeds=[208, 209, 210, 211, 212, 213, 214, 215, 216, 217], max_rounds=300):
-    """
-    Run the overfitting patience analysis for multiple seeds and save results to CSV and plot.
-    Also plot all loss curves on the same chart.
-    """
-    patience_results = []
-    all_train_losses = []
-    all_valid_losses = []
-    for seed in seeds:
-        params_seed = params.copy()
-        params_seed['seed'] = seed
-        np.random.seed(seed)
-        random.seed(seed)
-        plot_path = os.path.join(OUTPUT_DIRECTORY, f"loss_curve_seed_{seed}.png")
-        try:
-            patience, train_loss, valid_loss = analyze_overfitting_patience(train_df, valid_df, FEATURES, TARGET, params_seed, max_rounds=max_rounds, plot_path=plot_path)
-            patience_results.append((seed, patience))
-            all_train_losses.append((seed, train_loss))
-            all_valid_losses.append((seed, valid_loss))
-        except Exception as e:
-            print(f"Patience analysis failed for seed {seed}: {e}")
-            patience_results.append((seed, None))
-    # Save to CSV
-    output_csv = os.path.join(OUTPUT_DIRECTORY, "overfitting_patience_seeds.csv")
-    with open(output_csv, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Seed", "Recommended_Patience"])
-        for row in patience_results:
-            writer.writerow(row)
-    print(f"Multi-seed overfitting patience results saved to {output_csv}")
-    # Plot patience values as boxplot
-    valid_patiences = [p for s, p in patience_results if p is not None]
-    if valid_patiences:
-        plt.figure(figsize=(6,4))
-        plt.boxplot(valid_patiences, vert=False)
-        plt.title('Distribution of Recommended Patience (Multi-Seed)')
-        plt.xlabel('Patience Rounds')
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUTPUT_DIRECTORY, "overfitting_patience_boxplot.png"))
-        plt.close()
-        print(f"Patience values: {valid_patiences}")
-        print(f"Mean: {np.mean(valid_patiences):.2f}, Median: {np.median(valid_patiences):.2f}, Max: {np.max(valid_patiences)}, Min: {np.min(valid_patiences)}")
-        print(f"Recommended patience (max): {np.max(valid_patiences)}")
-    else:
-        print("No valid patience values computed.")
-    # Plot all loss curves on the same chart
-    if all_train_losses and all_valid_losses:
-        colors = matplotlib.colormaps.get_cmap('tab10')
-        plt.figure(figsize=(10,6))
-        for idx, (seed, train_loss) in enumerate(all_train_losses):
-            plt.plot(train_loss, label=f'Train (seed={seed})', linestyle='--', alpha=0.7, color=colors(idx))
-        for idx, (seed, valid_loss) in enumerate(all_valid_losses):
-            plt.plot(valid_loss, label=f'Valid (seed={seed})', linewidth=2, color=colors(idx))
-        plt.xlabel('Boosting Round')
-        plt.ylabel('L1 Loss')
-        plt.title('Train/Validation Loss Curves (All Seeds)')
-        plt.legend(ncol=2, fontsize=9)
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUTPUT_DIRECTORY, "all_loss_curves_multi_seed.png"))
-        plt.close()
-    return patience_results
-
-# --- Call multi-seed overfitting patience analysis after all dependencies are defined ---
-# try:
-#     multi_seed_overfitting_patience_analysis(train_split_df, valid_df, FEATURES, TARGET, final_params)
-# except Exception as e:
-#     logging.warning(f"Could not run multi-seed overfitting patience analysis: {e}")
-
-
-
-
-
-
-
-# --- Empirical Rolling Window Check ---
-# def empirical_rolling_window_check(df, features, window_sizes=[2, 3, 5, 7, 10], output_path="empirical_rolling_window_check.csv"):
-#     """
-#     For each feature and window size, compute rolling mean and sum, and report the percentage of non-zero (or non-constant) values.
-#     Saves a CSV summary for review.
-#     """
-#     results = []
-#     group_cols = [col for col in ["center_id", "meal_id"] if col in df.columns]
-#     for feat in features:
-#         if feat not in df.columns:
-#             continue
-#         for window in window_sizes:
-#             # Compute rolling mean and sum by group (if group columns exist)
-#             if group_cols:
-#                 rolled = df.groupby(group_cols, observed=False)[feat].rolling(window, min_periods=1).mean().reset_index(level=group_cols, drop=True)
-#                 rolled_sum = df.groupby(group_cols, observed=False)[feat].rolling(window, min_periods=1).sum().reset_index(level=group_cols, drop=True)
-#             else:
-#                 rolled = df[feat].rolling(window, min_periods=1).mean()
-#                 rolled_sum = df[feat].rolling(window, min_periods=1).sum()
-#             # % non-zero for mean and sum
-#             pct_nonzero_mean = (rolled != 0).mean() * 100
-#             pct_nonzero_sum = (rolled_sum != 0).mean() * 100
-#             # % unique for mean and sum
-#             pct_unique_mean = (rolled.nunique() / len(rolled)) * 100
-#             pct_unique_sum = (rolled_sum.nunique() / len(rolled_sum)) * 100
-#             results.append({
-#                 "feature": feat,
-#                 "window": window,
-#                 "pct_nonzero_mean": pct_nonzero_mean,
-#                 "pct_nonzero_sum": pct_nonzero_sum,
-#                 "pct_unique_mean": pct_unique_mean,
-#                 "pct_unique_sum": pct_unique_sum,
-#             })
-#     df_results = pd.DataFrame(results)
-#     df_results.to_csv(output_path, index=False)
-#     print(f"Empirical rolling window check saved to {output_path}")
-
-# --- Call empirical rolling window check after feature engineering ---
-# empirical_rolling_window_check(train_df, ["emailer_for_promotion", "homepage_featured", "num_orders", "checkout_price", "discount_pct"], output_path="empirical_rolling_window_check.csv")
-
-
-
-
-
-
-
-
-
-
-
-# --- Custom TimeSeriesSplit with Overlapping Validation Sets ---
-# def custom_timeseries_split_with_overlap(df, n_splits=3, overlap_weeks=4):
-#     """
-#     Custom TimeSeriesSplit that creates overlapping validation sets.
-#     For each split, the validation set starts before the end of the train set,
-#     allowing for evaluation of the model's performance on the most recent data.
-#     """
-#     df = df.sort_values('week')
-#     unique_weeks = df['week'].unique()
-#     n_weeks = len(unique_weeks)
-#     fold_size = n_weeks // n_splits
-#     for i in range(n_splits):
-#         val_start = max(0, (i * fold_size) - overlap_weeks)
-#         val_end = (i + 1) * fold_size
-#         if val_start >= val_end:
-#             continue
-#         train_idx = df[df['week'] < unique_weeks[val_start]].index
-#         val_idx = df[(df['week'] >= unique_weeks[val_start]) & (df['week'] <= unique_weeks[val_end - 1])].index
-#         yield train_idx, val_idx
-
-# --- Custom GroupTimeSeriesSplit ---
-class GroupTimeSeriesSplit:
-    """
-    Optimized cross-validator for time series data with non-overlapping groups.
-    Precomputes group-to-indices mapping for faster splits.
-    Each group appears in only one validation fold, and time order is respected.
-    """
-    def __init__(self, n_splits=5):
-        self.n_splits = n_splits
-
-    def split(self, X, y=None, groups=None):
-        if groups is None:
-            raise ValueError("Group labels must be provided for GroupTimeSeriesSplit.")
-        groups = pd.Series(groups).reset_index(drop=True)
-        # Precompute group to row indices mapping
-        group_to_indices = {}
-        for idx, group in enumerate(groups):
-            group_to_indices.setdefault(group, []).append(idx)
-        unique_groups = list(group_to_indices.keys())
-        group_folds = np.array_split(unique_groups, self.n_splits)
-        for fold_groups in group_folds:
-            val_indices = []
-            for g in fold_groups:
-                val_indices.extend(group_to_indices[g])
-            val_indices = np.array(val_indices)
-            train_groups = set(unique_groups) - set(fold_groups)
-            train_indices = []
-            for g in train_groups:
-                train_indices.extend(group_to_indices[g])
-            train_indices = np.array(train_indices)
-            # Sort indices by time if possible
-            if hasattr(X, 'iloc') and 'week' in X.columns:
-                train_indices = train_indices[np.argsort(X.iloc[train_indices]['week'].values)]
-                val_indices = val_indices[np.argsort(X.iloc[val_indices]['week'].values)]
-            yield train_indices, val_indices
-
-
-# --- Rolling Window GroupTimeSeriesSplit ---
 class RollingGroupTimeSeriesSplit:
     """
     Rolling window cross-validator for time series data with group awareness.
@@ -683,271 +395,6 @@ class RollingGroupTimeSeriesSplit:
             val_indices = np.where(val_mask & pd.notnull(groups))[0]
             yield train_indices, val_indices
 
-def compare_time_series_cv(train_df, FEATURES, TARGET, output_dir="output", seeds=[13, 123, 1999, 2025, 9001]):
-    """
-    Compare TimeSeriesSplit and GroupTimeSeriesSplit in detail, including per-fold metrics and plots, for multiple seeds.
-    """
-    results = []
-    all_folds = []
-    for seed in seeds:
-        np.random.seed(seed)
-        cv_methods = {
-            'TimeSeriesSplit': TimeSeriesSplit(n_splits=5),
-            'GroupTimeSeriesSplit': GroupTimeSeriesSplit(n_splits=5),
-            'RollingGroupTimeSeriesSplit': RollingGroupTimeSeriesSplit(n_splits=5, train_window=120, val_window=10, week_col='week')
-        }
-        X = train_df[FEATURES]
-        # For RollingGroupTimeSeriesSplit, we need to include 'week' column
-        if 'week' not in FEATURES:
-            X_with_week = train_df[FEATURES + ['week']]
-        else:
-            X_with_week = X
-        y = train_df[TARGET]
-        groups = train_df['center_id'] if 'center_id' in train_df.columns else None
-        for name, cv in cv_methods.items():
-            print(f"\nTesting {name} (seed={seed})...")
-            fold_metrics = []
-            # Handle group requirements
-            if name in ['GroupTimeSeriesSplit', 'RollingGroupTimeSeriesSplit'] and groups is None:
-                print(f"No group labels available, skipping {name}.")
-                continue
-            if name == 'RollingGroupTimeSeriesSplit':
-                splits = cv.split(X_with_week, y, groups=groups)
-                X_used = X_with_week
-            elif name == 'GroupTimeSeriesSplit':
-                splits = cv.split(X, y, groups=groups)
-                X_used = X
-            else:
-                splits = cv.split(X, y)
-                X_used = X
-            for fold, (train_idx, val_idx) in enumerate(splits):
-                X_train, X_val = X_used.iloc[train_idx], X_used.iloc[val_idx]
-                # Drop 'week' column for RollingGroupTimeSeriesSplit before fitting
-                if name == 'RollingGroupTimeSeriesSplit' and 'week' in X_train.columns:
-                    X_train = X_train.drop(columns=['week'])
-                    X_val = X_val.drop(columns=['week'])
-                y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-                model = LGBMRegressor(n_estimators=2000, random_state=seed)
-                model.fit(X_train, y_train, callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)])
-                y_pred = model.predict(X_val)
-                rmsle = np.sqrt(mean_squared_log_error(np.maximum(0, y_val), np.maximum(0, y_pred)))
-                mae = mean_absolute_error(y_val, y_pred)
-                r2 = r2_score(y_val, y_pred)
-                fold_metrics.append({'seed': seed, 'cv': name, 'fold': fold+1, 'rmsle': rmsle, 'mae': mae, 'r2': r2})
-                print(f"  Fold {fold+1}: RMSLE={rmsle:.4f}, MAE={mae:.2f}, R2={r2:.4f}")
-            # Save results
-            all_folds.extend(fold_metrics)
-            results.append({
-                'seed': seed,
-                'cv': name,
-                'mean_rmsle': np.mean([m['rmsle'] for m in fold_metrics]),
-                'std_rmsle': np.std([m['rmsle'] for m in fold_metrics]),
-                'mean_mae': np.mean([m['mae'] for m in fold_metrics]),
-                'std_mae': np.std([m['mae'] for m in fold_metrics]),
-                'mean_r2': np.mean([m['r2'] for m in fold_metrics]),
-                'std_r2': np.std([m['r2'] for m in fold_metrics]),
-                'folds': fold_metrics
-            })
-            # Plot per-fold RMSLE for this seed and CV type
-            plt.plot([m['rmsle'] for m in fold_metrics], marker='o', label=f"{name} (seed={seed})")
-    plt.xlabel('Fold')
-    plt.ylabel('RMSLE')
-    plt.title('Time Series CV Comparison: Fold RMSLEs (Multiple Seeds)')
-    plt.legend()
-    plt.tight_layout()
-    plot_path = os.path.join(output_dir, 'timeseries_cv_comparison_multiseed.png')
-    plt.savefig(plot_path)
-    plt.close()
-    # Save results to CSV
-    pd.DataFrame(all_folds).to_csv(os.path.join(output_dir, 'timeseries_cv_comparison_folds_multiseed.csv'), index=False)
-    pd.DataFrame(results).drop('folds', axis=1).to_csv(os.path.join(output_dir, 'timeseries_cv_comparison_summary_multiseed.csv'), index=False)
-    print(f"\nDetailed results saved to {plot_path}, timeseries_cv_comparison_folds_multiseed.csv, and timeseries_cv_comparison_summary_multiseed.csv")
-
-# --- Early exit for debugging purposes ---
-# compare_time_series_cv(train_df, FEATURES, TARGET, output_dir=OUTPUT_DIRECTORY, seeds=[13, 123, 1999, 2025, 9001])
-
-# --- Cross-Validation Strategy Experiment ---
-# def run_cv_strategy_experiment(train_df, FEATURES, TARGET, output_dir="output"):
-#     """
-#     Run and plot a comparison of different CV strategies on the current data and feature set.
-#     """
-
-
-#     # Optional: iterative-stratification
-#     try:
-#         HAS_ITERSTRAT = True
-#     except ImportError:
-#         HAS_ITERSTRAT = False
-#         print("iterative-stratification not installed. Skipping those CV types.")
-#     X = train_df[FEATURES]
-#     y = train_df[TARGET]
-#     cv_strategies = {
-#         'KFold': KFold(n_splits=5, shuffle=True, random_state=42),
-#         'StratifiedKFold': StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
-#         'TimeSeriesSplit': TimeSeriesSplit(n_splits=5),
-#         'GroupKFold(center_id)': GroupKFold(n_splits=5),
-#         'GroupTimeSeriesSplit': GroupTimeSeriesSplit(n_splits=5),
-#     }
-#     # Add custom_timeseries_split_with_overlap to CV strategies
-#     def custom_timeseries_split_with_overlap_wrapper(X, y=None, n_splits=3, overlap_weeks=4):
-#         # Use the global train_df for week info
-#         for train_idx, val_idx in custom_timeseries_split_with_overlap(train_df, n_splits=n_splits, overlap_weeks=overlap_weeks):
-#             if len(train_idx) > 0 and len(val_idx) > 0:
-#                 yield train_idx, val_idx
-#     cv_strategies['CustomTimeSeriesOverlap'] = custom_timeseries_split_with_overlap_wrapper
-#     if HAS_ITERSTRAT:
-#         cv_strategies['RepeatedMultilabelStratifiedKFold'] = RepeatedMultilabelStratifiedKFold(n_splits=5, n_repeats=3, random_state=42)
-#         cv_strategies['MultilabelStratifiedKFold'] = MultilabelStratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-#     # IterativeStratification handled as a special case below
-#     def get_stratify_labels():
-#         if 'category' in train_df.columns:
-#             return train_df['category']
-#         elif 'cuisine' in train_df.columns:
-#             return train_df['cuisine']
-#         else:
-#             return pd.qcut(y, q=5, labels=False, duplicates='drop')
-#     def get_groups():
-#         if 'center_id' in train_df.columns:
-#             return train_df['center_id']
-#         else:
-#             return None
-#     def get_multilabel():
-#         cols = []
-#         for c in ['category', 'cuisine']:
-#             if c in train_df.columns:
-#                 cols.append(pd.get_dummies(train_df[c], prefix=c))
-#         if cols:
-#             return pd.concat(cols, axis=1).values
-#         else:
-#             return None
-#     results = []    # Precompute labels
-#     stratify_labels = get_stratify_labels()
-#     groups = get_groups()
-#     multilabel = get_multilabel()
-#     for name, cv in cv_strategies.items():
-#         print(f"\nRunning CV: {name}")
-#         rmsle_scores = []
-#         splits = None
-#         if name == 'StratifiedKFold':
-#             if stratify_labels is not None:
-#                 splits = cv.split(X, stratify_labels)
-#             else:
-#                 print(f"No stratify labels available, skipping {name}.")
-#                 continue
-#         elif name == 'GroupKFold(center_id)':
-#             if groups is not None:
-#                 splits = cv.split(X, y, groups)
-#             else:
-#                 print(f"No group labels available, skipping {name}.")
-#                 continue
-#         elif name == 'CustomTimeSeriesOverlap':
-#             splits = list(cv(X, y))
-#         elif name == 'GroupTimeSeriesSplit':
-#             if groups is not None:
-#                 splits = cv.split(X, y, groups)
-#             else:
-#                 print(f"No group labels available, skipping {name}.")
-#                 continue
-#         elif name in ['MultilabelStratifiedKFold', 'RepeatedMultilabelStratifiedKFold'] and HAS_ITERSTRAT:
-#             if multilabel is not None:
-#                 splits = cv.split(X, multilabel)
-#             else:
-#                 print(f"No multilabels available, skipping {name}.")
-#                 continue
-#         elif name == 'IterativeStratification' and HAS_ITERSTRAT:
-#             if multilabel is not None:
-#                 istrat = IterativeStratification(labels=multilabel, r=5, random_state=42)
-#                 splits = istrat
-#             else:
-#                 print("No multilabels available, skipping IterativeStratification.")
-#                 continue
-#         else:
-#             splits = cv.split(X, y)
-#         for fold, (train_idx, val_idx) in enumerate(splits):
-#             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-#             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-#             model = LGBMRegressor(n_estimators=300, random_state=42)
-#             model.fit(X_train, y_train)
-#             y_pred = model.predict(X_val)
-#             rmsle = np.sqrt(mean_squared_log_error(np.maximum(0, y_val), np.maximum(0, y_pred)))
-#             rmsle_scores.append(rmsle)
-#             print(f"  Fold {fold+1}: RMSLE={rmsle:.4f}")
-#     # --- Plot Results ---
-#     plt.figure(figsize=(10,6))
-#     for r in results:
-#         plt.plot(r['folds'], marker='o', label=f"{r['cv']} (mean={r['mean_rmsle']:.4f})")
-#     plt.xlabel('Fold')
-#     plt.ylabel('RMSLE')
-#     plt.title('CV Strategy Comparison: Fold RMSLEs')
-#     plt.legend()
-#     plt.tight_layout()
-#     plot_path = os.path.join(output_dir, 'cv_strategy_comparison.png')
-#     plt.savefig(plot_path)
-#     plt.close()
-#     # Save results to CSV
-#     pd.DataFrame(results).to_csv(os.path.join(output_dir, 'cv_strategy_comparison_results.csv'), index=False)
-#     print(f"\nAll results saved to {plot_path} and cv_strategy_comparison_results.csv")
-
-# --- Call CV strategy experiment after feature engineering ---
-# run_cv_strategy_experiment(train_df, FEATURES, TARGET, OUTPUT_DIRECTORY)
-
-
-
-# --- Empirical GroupTimeSeriesSplit Grouping Strategy Test ---
-def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits=3, max_folds=3):
-    """
-    Empirically test GroupTimeSeriesSplit with different groupings:
-    - meal_id only
-    - center_id only
-    - (center_id, meal_id) composite
-    Prints mean/std RMSLE for each and recommends the best.
-    """
-    # Ensure positional indices for iloc
-    train_df = train_df.reset_index(drop=True)
-    groupings = OrderedDict({
-        'meal_id': train_df['meal_id'],
-        'center_id': train_df['center_id'],
-        'center_meal': train_df['center_id'].astype(str) + '_' + train_df['meal_id'].astype(str),
-    })
-    results = {}
-    for name, groups in groupings.items():
-        rmsles = []
-        gtscv = GroupTimeSeriesSplit(n_splits=n_splits)
-        print(f"\nTesting GroupTimeSeriesSplit with groups = {name}...")
-        for fold, (train_idx, val_idx) in enumerate(gtscv.split(train_df, groups=groups)):
-            if fold >= max_folds:
-                break
-            model_params = dict(params or final_params)
-            # model_params.pop('n_estimators', None)
-            train_idx = np.array(train_idx).flatten()
-            val_idx = np.array(val_idx).flatten()
-            X_tr, X_val = train_df.iloc[train_idx][FEATURES], train_df.iloc[val_idx][FEATURES]
-            y_tr, y_val = train_df.iloc[train_idx][TARGET], train_df.iloc[val_idx][TARGET]
-            model = LGBMRegressor(**model_params, random_state=SEED)
-            model.fit(X_tr, y_tr)
-            y_pred = model.predict(X_val)
-            score = rmsle(y_val, y_pred)
-            rmsles.append(score)
-            print(f"  Fold {fold+1}: RMSLE={score:.4f}")
-        mean_rmsle = np.mean(rmsles)
-        std_rmsle = np.std(rmsles)
-        results[name] = (mean_rmsle, std_rmsle)
-        print(f"Mean RMSLE: {mean_rmsle:.5f}, Std: {std_rmsle:.5f}")
-    # Recommend best
-    best_group = min(results, key=lambda k: results[k][0])
-    print("\nSummary of Grouping Strategies:")
-    for k, (mean_r, std_r) in results.items():
-        print(f"  {k:15s}: Mean RMSLE={mean_r:.5f}, Std={std_r:.5f}")
-    print(f"\nRecommended grouping for GroupTimeSeriesSplit: {best_group} (lowest mean RMSLE)")
-    return results
-
-# --- Run empirical group split test before Optuna tuning ---
-# try:
-#     empirical_group_split_test(train_split_df, FEATURES, TARGET, params=final_params, n_splits=3, max_folds=3)
-# except Exception as e:
-#     logging.warning(f"Could not run empirical group split test: {e}")
-
-
 # --- Feature Selection and Hyperparameter Tuning with Optuna ---
 
 # --- Precompute eligible features and all possible combos for Optuna feature interactions (module-level, before study) ---
@@ -956,8 +403,6 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
 FROZEN_FEATURES_FOR_INTERACTIONS = [
     'checkout_price', 'base_price', 'discount', 'discount_pct', 'price_diff',
     'center_orders_mean', 'meal_orders_mean',
-    # 'meal_orders_mean_x_discount_pct', 'meal_orders_mean_x_emailer_for_promotion', 'price_diff_x_emailer', 'price_diff_x_homepage',
-    # 'discount_pct_x_emailer', 'discount_pct_x_homepage'
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
 MAX_INTERACTION_ORDER = min(4, len(FROZEN_FEATURES_FOR_INTERACTIONS))
@@ -1021,8 +466,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
 
-
-
     interaction_features = []
     new_interaction_cols = {}
     used_interactions = set()
@@ -1052,7 +495,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Ensure selected features are unique and not empty
     selected_features = list(dict.fromkeys(selected_features))
     if len(selected_features) < 5:
-        raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
+        return optuna.TrialPruned()
+        # raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
 
     # Use rolling window group time series split
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
@@ -1076,7 +520,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         y_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
         score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_pred)
         if (score is None or np.isnan(score) or np.isinf(score)):
-            raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
+            return optuna.TrialPruned()
+            # raise lgb.callback.EarlyStopException(best_iteration=0, best_score=float('inf'))
         scores.append(score)
     return np.mean(scores)
 
@@ -1084,8 +529,6 @@ logging.info("Starting Optuna feature+hyperparam selection...")
 
 # Reduce Optuna logging verbosity
 optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-# Use NSGAIISampler for multi-objective/genetic search
 
 class TqdmOptunaCallback:
     def __init__(self, n_trials, study=None, print_every=1):
@@ -1133,11 +576,7 @@ class TqdmOptunaCallback:
     def close(self):
         self.pbar.close()
 
-# Create the study with NSGAIISampler
-# --- NSGAIISampler advanced configuration ---
-
-# Recommended: population_size = 16-32, crossover_prob=0.9, swapping_prob=0.5, mutation_prob=1/num_params
-
+# Create the study 
 optuna_storage = OPTUNA_DB
 feature_hyperparam_study = optuna.create_study(
     direction="minimize",
@@ -1154,6 +593,7 @@ feature_hyperparam_study = optuna.create_study(
         # mutation_prob=mutation_prob
     )
 )
+
 # Pass the study to the callback so it can initialize best_value/best_trial
 
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
@@ -1174,9 +614,6 @@ except Exception as e:
 optuna_callback.close()
 
 # Reload the study from storage to ensure best_trial is up to date
-# try:
-
-
 feature_hyperparam_study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
 
 # Diagnostic: Show all trial values and states after reload
@@ -1289,7 +726,7 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
 
 # --- Recursive Ensemble Prediction with Selected Features ---
 logging.info("Running recursive ensemble prediction with selected features...")
-ensemble_preds, ensemble_models = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=N_ENSEMBLE_MODELS, eval_metric=lgb_rmsle)
+ensemble_preds, ensemble_models = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=N_ENSEMBLE_MODELS, eval_metric=rmsle_lgbm)
 final_predictions_df = pd.DataFrame({'id': test_df['id'].astype(int), 'num_orders': ensemble_preds})
 submission_path_ensemble_final = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv")
 final_predictions_df.to_csv(submission_path_ensemble_final, index=False)
