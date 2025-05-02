@@ -1,28 +1,40 @@
-import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
 import matplotlib
 matplotlib.use('Agg')
-
+import re
 from functools import partial
-
+from collections import OrderedDict
+import random
 import os
 OUTPUT_DIRECTORY = "output"
 os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
 
-import re
-import pandas as pd
-import numpy as np
+import matplotlib.pyplot as plt
 from lightgbm import LGBMRegressor
 import lightgbm as lgb  # Added for early stopping callback
 import optuna
+from optuna.integration import LightGBMPruningCallback
+from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
+from optuna.samplers import NSGAIISampler
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, GroupKFold
+from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
 import shap
 from tqdm import tqdm
 import logging
 import csv
-import random
-from optuna.integration import LightGBMPruningCallback
+from itertools import combinations
+
 
 import warnings
 warnings.filterwarnings("ignore", message="The reported value is ignored because this `step` .* is already reported.")
+
+
+
+
+
+
 
 DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
@@ -37,6 +49,7 @@ VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 30 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
+OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
@@ -115,36 +128,20 @@ def create_group_aggregates(df):
         df_out['category_orders_std'] = df_out.groupby('category', observed=False)['num_orders'].transform('std')
     return df_out
 
-def create_selected_interaction_features(df):
-    df_out = df.copy()
-    if 'price_diff' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
-        df_out['price_diff_x_emailer'] = df_out['price_diff'] * df_out['emailer_for_promotion']
-    if 'price_diff' in df_out.columns and 'homepage_featured' in df_out.columns:
-        df_out['price_diff_x_homepage'] = df_out['price_diff'] * df_out['homepage_featured']
-    if 'discount_pct' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
-        df_out['discount_pct_x_emailer'] = df_out['discount_pct'] * df_out['emailer_for_promotion']
-    if 'discount_pct' in df_out.columns and 'homepage_featured' in df_out.columns:
-        df_out['discount_pct_x_homepage'] = df_out['discount_pct'] * df_out['homepage_featured']
-    if 'meal_orders_mean' in df_out.columns and 'discount_pct' in df_out.columns:
-        df_out['meal_orders_mean_x_discount_pct'] = df_out['meal_orders_mean'] * df_out['discount_pct']
-    if 'meal_orders_mean' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
-        df_out['meal_orders_mean_x_emailer_for_promotion'] = df_out['meal_orders_mean'] * df_out['emailer_for_promotion']
-    return df_out
-
-# def add_promo_recency_features(df):
+# def create_selected_interaction_features(df):
 #     df_out = df.copy()
-#     group_cols = [col for col in ["center_id", "meal_id"] if col in df_out.columns]
-#     for promo_col, name in [("emailer_for_promotion", "weeks_since_last_emailer"), ("homepage_featured", "weeks_since_last_homepage")]:
-#         if promo_col in df_out.columns:
-#             def weeks_since_last(x):
-#                 last = -1
-#                 out = []
-#                 for i, val in enumerate(x):
-#                     if val:
-#                         last = i
-#                     out.append(i - last if last != -1 else np.nan)
-#                 return out
-#             df_out[name] = df_out.groupby(group_cols, observed=False)[promo_col].transform(weeks_since_last)
+#     if 'price_diff' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
+#         df_out['price_diff_x_emailer'] = df_out['price_diff'] * df_out['emailer_for_promotion']
+#     if 'price_diff' in df_out.columns and 'homepage_featured' in df_out.columns:
+#         df_out['price_diff_x_homepage'] = df_out['price_diff'] * df_out['homepage_featured']
+#     if 'discount_pct' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
+#         df_out['discount_pct_x_emailer'] = df_out['discount_pct'] * df_out['emailer_for_promotion']
+#     if 'discount_pct' in df_out.columns and 'homepage_featured' in df_out.columns:
+#         df_out['discount_pct_x_homepage'] = df_out['discount_pct'] * df_out['homepage_featured']
+#     if 'meal_orders_mean' in df_out.columns and 'discount_pct' in df_out.columns:
+#         df_out['meal_orders_mean_x_discount_pct'] = df_out['meal_orders_mean'] * df_out['discount_pct']
+#     if 'meal_orders_mean' in df_out.columns and 'emailer_for_promotion' in df_out.columns:
+#         df_out['meal_orders_mean_x_emailer_for_promotion'] = df_out['meal_orders_mean'] * df_out['emailer_for_promotion']
 #     return df_out
 
 def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_train=True):
@@ -177,14 +174,12 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     df_out = create_other_features(df_out)
     df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], [3, 5, 10])
     df_out = create_group_aggregates(df_out)
-    df_out = create_selected_interaction_features(df_out)
-    # df_out = add_promo_recency_features(df_out)
+    # df_out = create_selected_interaction_features(df_out)
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
     lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
-        "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_x_emailer", "_x_home",
-        "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_mean", "_std"
-        # "_x_discount_pct", "_x_price_diff", "_x_weekofyear", "_mean", "_std", "weeks_since_last_emailer", "weeks_since_last_homepage"
+        "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_mean", "_std"
+        # "_x_emailer", "_x_home", "_x_discount_pct", "_x_price_diff", "_x_weekofyear",
     ])]
     cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
     if cols_to_fill:
@@ -264,13 +259,13 @@ for prefix in ["center_orders_", "meal_orders_", "category_orders_"]:
 
 
 # Add selected interaction features
-for col in [
-    "price_diff_x_emailer", "price_diff_x_homepage", "discount_pct_x_emailer", "discount_pct_x_homepage",
-    "meal_orders_mean_x_discount_pct", "meal_orders_mean_x_emailer_for_promotion"
-]:
-    if col in train_df.columns and col not in features_set:
-        FEATURES.append(col)
-        features_set.add(col)
+# for col in [
+#     "price_diff_x_emailer", "price_diff_x_homepage", "discount_pct_x_emailer", "discount_pct_x_homepage",
+#     "meal_orders_mean_x_discount_pct", "meal_orders_mean_x_emailer_for_promotion"
+# ]:
+#     if col in train_df.columns and col not in features_set:
+#         FEATURES.append(col)
+#         features_set.add(col)
 
 # Add recency features
 # for col in ["weeks_since_last_emailer", "weeks_since_last_homepage"]:
@@ -517,8 +512,6 @@ def multi_seed_overfitting_patience_analysis(train_df, valid_df, FEATURES, TARGE
         print("No valid patience values computed.")
     # Plot all loss curves on the same chart
     if all_train_losses and all_valid_losses:
-        import matplotlib.cm as cm
-        import matplotlib
         colors = matplotlib.colormaps.get_cmap('tab10')
         plt.figure(figsize=(10,6))
         for idx, (seed, train_loss) in enumerate(all_train_losses):
@@ -552,8 +545,6 @@ def multi_seed_overfitting_patience_analysis(train_df, valid_df, FEATURES, TARGE
 #     For each feature and window size, compute rolling mean and sum, and report the percentage of non-zero (or non-constant) values.
 #     Saves a CSV summary for review.
 #     """
-#     import pandas as pd
-#     import numpy as np
 #     results = []
 #     group_cols = [col for col in ["center_id", "meal_id"] if col in df.columns]
 #     for feat in features:
@@ -696,12 +687,6 @@ def compare_time_series_cv(train_df, FEATURES, TARGET, output_dir="output", seed
     """
     Compare TimeSeriesSplit and GroupTimeSeriesSplit in detail, including per-fold metrics and plots, for multiple seeds.
     """
-    from lightgbm import LGBMRegressor
-    from sklearn.model_selection import TimeSeriesSplit
-    from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
-    import numpy as np
-    import matplotlib.pyplot as plt
-    import os
     results = []
     all_folds = []
     for seed in seeds:
@@ -774,7 +759,6 @@ def compare_time_series_cv(train_df, FEATURES, TARGET, output_dir="output", seed
     plt.savefig(plot_path)
     plt.close()
     # Save results to CSV
-    import pandas as pd
     pd.DataFrame(all_folds).to_csv(os.path.join(output_dir, 'timeseries_cv_comparison_folds_multiseed.csv'), index=False)
     pd.DataFrame(results).drop('folds', axis=1).to_csv(os.path.join(output_dir, 'timeseries_cv_comparison_summary_multiseed.csv'), index=False)
     print(f"\nDetailed results saved to {plot_path}, timeseries_cv_comparison_folds_multiseed.csv, and timeseries_cv_comparison_summary_multiseed.csv")
@@ -787,16 +771,10 @@ def compare_time_series_cv(train_df, FEATURES, TARGET, output_dir="output", seed
 #     """
 #     Run and plot a comparison of different CV strategies on the current data and feature set.
 #     """
-#     import matplotlib.pyplot as plt
-#     from lightgbm import LGBMRegressor
-#     from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, GroupKFold
-#     from sklearn.metrics import mean_squared_log_error
-#     import pandas as pd
-#     import numpy as np
-#     import os
+
+
 #     # Optional: iterative-stratification
 #     try:
-#         from iterstrat.ml_stratifiers import MultilabelStratifiedKFold, IterativeStratification, RepeatedMultilabelStratifiedKFold
 #         HAS_ITERSTRAT = True
 #     except ImportError:
 #         HAS_ITERSTRAT = False
@@ -878,7 +856,6 @@ def compare_time_series_cv(train_df, FEATURES, TARGET, output_dir="output", seed
 #                 continue
 #         elif name == 'IterativeStratification' and HAS_ITERSTRAT:
 #             if multilabel is not None:
-#                 from iterstrat.ml_stratifiers import IterativeStratification
 #                 istrat = IterativeStratification(labels=multilabel, r=5, random_state=42)
 #                 splits = istrat
 #             else:
@@ -927,7 +904,6 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
     """
     # Ensure positional indices for iloc
     train_df = train_df.reset_index(drop=True)
-    from collections import OrderedDict
     groupings = OrderedDict({
         'meal_id': train_df['meal_id'],
         'center_id': train_df['center_id'],
@@ -979,12 +955,11 @@ def empirical_group_split_test(train_df, FEATURES, TARGET, params=None, n_splits
 # --- Freeze eligible features for Optuna interaction search ---
 FROZEN_FEATURES_FOR_INTERACTIONS = [
     'checkout_price', 'base_price', 'discount', 'discount_pct', 'price_diff',
-    'center_orders_mean', 'meal_orders_mean', 'meal_orders_mean_x_discount_pct',
-    'meal_orders_mean_x_emailer_for_promotion', 'price_diff_x_emailer', 'price_diff_x_homepage',
-    'discount_pct_x_emailer', 'discount_pct_x_homepage'
+    'center_orders_mean', 'meal_orders_mean',
+    # 'meal_orders_mean_x_discount_pct', 'meal_orders_mean_x_emailer_for_promotion', 'price_diff_x_emailer', 'price_diff_x_homepage',
+    # 'discount_pct_x_emailer', 'discount_pct_x_homepage'
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
-from itertools import combinations
 MAX_INTERACTION_ORDER = min(4, len(FROZEN_FEATURES_FOR_INTERACTIONS))
 MAX_INTERACTIONS_PER_ORDER = {2: 5, 3: 3, 4: 2, 5: 2}
 ALL_COMBOS_STR = {}
@@ -1094,7 +1069,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             ],
             eval_metric=rmsle_lgbm,
             callbacks=[
-                LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1', ),
+                LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
                 early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
             ]
         )
@@ -1111,7 +1086,6 @@ logging.info("Starting Optuna feature+hyperparam selection...")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # Use NSGAIISampler for multi-objective/genetic search
-from optuna.samplers import NSGAIISampler
 
 class TqdmOptunaCallback:
     def __init__(self, n_trials, study=None, print_every=1):
@@ -1161,7 +1135,6 @@ class TqdmOptunaCallback:
 
 # Create the study with NSGAIISampler
 # --- NSGAIISampler advanced configuration ---
-from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
 
 # Recommended: population_size = 16-32, crossover_prob=0.9, swapping_prob=0.5, mutation_prob=1/num_params
 
@@ -1188,15 +1161,30 @@ try:
     feature_hyperparam_study.optimize(
         partial(optuna_feature_selection_and_hyperparam_objective, train_split_df=train_split_df),
         n_trials=OPTUNA_TRIALS,
-        timeout=7200,
+        timeout=OPTUNA_TIMEOUT,
         callbacks=[optuna_callback],
         n_jobs=1
     )
 except KeyboardInterrupt:
-    print("\nInterrupted! Waiting for the current trial to finish and be saved...")
-finally:
-    print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
+    logging.warning("Optuna optimization interrupted by user. All completed trials are saved.")
+except Exception as e:
+    logging.warning(f"Optuna optimization failed: {e}")
+
+# Close the progress bar
 optuna_callback.close()
+
+# Reload the study from storage to ensure best_trial is up to date
+# try:
+
+
+feature_hyperparam_study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
+
+# Diagnostic: Show all trial values and states after reload
+df_trials = feature_hyperparam_study.trials_dataframe()
+print(df_trials[['number', 'value', 'state']].sort_values('value').head(20))
+print("Best value among COMPLETE trials:", df_trials[df_trials['state'] == 'COMPLETE']['value'].min())
+print("Best value among ALL trials:", df_trials['value'].min())
+print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
 
 # Extract best features and params, but handle missing best_trial gracefully
 if feature_hyperparam_study.best_trial is None:
@@ -1204,9 +1192,17 @@ if feature_hyperparam_study.best_trial is None:
     SELECTED_FEATURES = FEATURES.copy()
     best_params = final_params.copy()
 else:
-    best_mask = [feature_hyperparam_study.best_trial.params.get(f, False) for f in FEATURES]
+    # Defensive: get the best completed trial manually in case of interrupted run
+    trials = [t for t in feature_hyperparam_study.get_trials(deepcopy=False) if t.state == optuna.trial.TrialState.COMPLETE]
+    if trials:
+        best_trial = min(trials, key=lambda t: t.value)
+    else:
+        best_trial = feature_hyperparam_study.best_trial
+    best_mask = [best_trial.params.get(f, False) for f in FEATURES]
     SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
-    best_params = {k: v for k, v in feature_hyperparam_study.best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
+    best_params = {k: v for k, v in best_trial.params.items() if k not in FEATURES and not k.endswith('_pair')}
+    logging.info(f"Optuna-selected params: {best_params}")
+    logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
     if best_params.get('boosting_type') == 'goss':
         best_params['bagging_fraction'] = 1.0
         best_params['bagging_freq'] = 0
