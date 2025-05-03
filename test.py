@@ -34,8 +34,10 @@ TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
-LAG_WEEKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
+LAG_WEEKS = [1]
+ROLLING_WINDOWS = [2]
+# LAG_WEEKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+# ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
@@ -557,6 +559,10 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     trial.set_user_attr('gap_penalty', float(gap_penalty))
     trial.set_user_attr('complexity_penalty', float(complexity_penalty))
     trial.set_user_attr('reg_reward', float(reg_reward))
+    # Store selected features and objective value for callback/plotting
+    trial.set_user_attr('selected_features', selected_features)
+    objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
+    trial.set_user_attr('objective', objective_val)
 
     # Multi-objective: minimize mean_valid, gap_penalty, complexity_penalty, maximize reg_reward (so minimize -reg_reward)
     # If any objective is nan/inf, prune
@@ -580,15 +586,29 @@ logging.info("Starting Optuna feature+hyperparam selection...")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 class TqdmOptunaCallback:
+    def minmax_scale(self, arr, arr2=None):
+        # arr2: if provided, scale both arrays together using their combined min/max
+        arr_clean = [v for v in arr if v is not None]
+        if arr2 is not None:
+            arr2_clean = [v for v in arr2 if v is not None]
+            all_vals = arr_clean + arr2_clean
+        else:
+            all_vals = arr_clean
+        if not all_vals:
+            return arr
+        min_v, max_v = min(all_vals), max(all_vals)
+        if min_v == max_v:
+            return [0.5 for _ in arr]
+        return [(v - min_v) / (max_v - min_v) if v is not None else None for v in arr]
     def __init__(self, n_trials, study=None, print_every=1):
         self.n_trials = n_trials
         self.print_every = print_every
         self.study = study
+        self.terminal_height = None
         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
 
     def __call__(self, study, trial):
         self.pbar.update(1)
-        n_features = sum([v for k, v in trial.params.items() if isinstance(v, bool) and v])
         num_leaves = trial.params.get('num_leaves', None)
         max_depth = trial.params.get('max_depth', None)
         lambda_l1 = trial.params.get('lambda_l1', None)
@@ -596,28 +616,43 @@ class TqdmOptunaCallback:
         mean_train = trial.user_attrs.get('mean_train', None)
         mean_valid = trial.user_attrs.get('mean_valid', None)
         generalization_gap = trial.user_attrs.get('generalization_gap', None)
+        n_features = len(trial.user_attrs.get('selected_features', []))
+        objective_val = trial.user_attrs.get('objective', None)
         msg = (
             f"Trial {trial.number} | mean_valid: {mean_valid} | gap: {generalization_gap} | "
-            f"Features: {n_features} | num_leaves: {num_leaves} | max_depth: {max_depth} | "
+            f"objective: {objective_val} | features: {n_features} | num_leaves: {num_leaves} | max_depth: {max_depth} | "
             f"lambda_l1: {lambda_l1} | lambda_l2: {lambda_l2}"
         )
-        tqdm.write(msg)
 
         # Live ASCII plot using plotext, with progress bar handling
         if trial.number % self.print_every == 0:
+            import plotext as pltx
+            
             self.pbar.close()  # Close progress bar before plotting
-            self.live_plot_objectives(study.trials)
-            self.pbar = tqdm(total=self.n_trials, desc="Optuna Trials", position=0, leave=True)
+
+            # Clear previous plot lines
+            if self.terminal_height is not None:
+                pltx.clear_terminal(lines=self.terminal_height)
+
+            # Set terminal size for plotext clear_terminal
+            self.terminal_height = pltx.terminal_height()
+
+            self.live_plot_objectives(study.trials, top_string=msg)
+
+            self.pbar = tqdm(total=self.n_trials, desc="Optuna Trials", position=0, leave=False)
             self.pbar.n = trial.number + 1  # Restore progress
+
             self.pbar.refresh()
 
-    def live_plot_objectives(self, trials):
+    def live_plot_objectives(self, trials, top_string):
         pltx.clf()
         trial_nums = []
         mean_valids = []
         gap_penalties = []
         complexity_penalties = []
         reg_rewards = []
+        objectives = []
+        n_features_list = []
         for t in trials:
             if t.values is not None and len(t.values) >= 4:
                 trial_nums.append(t.number)
@@ -625,21 +660,54 @@ class TqdmOptunaCallback:
                 gap_penalties.append(t.values[1])
                 complexity_penalties.append(t.values[2])
                 reg_rewards.append(-t.values[3])  # Negated because you minimize -reg_reward
+                # Use user_attrs for objective and selected_features if available
+                obj = t.user_attrs.get('objective', None)
+                objectives.append(obj)
+                n_features = len(t.user_attrs.get('selected_features', []))
+                n_features_list.append(n_features)
         if trial_nums:
-            # Use darker, less bright colors for plotext
-            pltx.plot(trial_nums, mean_valids, label='mean_valid', color='cyan')
-            pltx.plot(trial_nums, gap_penalties, label='gap_penalty', color='magenta')
-            pltx.plot(trial_nums, complexity_penalties, label='complexity_penalty', color='blue')
-            pltx.plot(trial_nums, reg_rewards, label='reg_reward', color='green')
-            pltx.title('Optuna Objectives (Live)')
+            # Min-max scale mean_valids and objectives together for label spacing
+            # mean_valids_scaled = self.minmax_scale(mean_valids, objectives)
+            # objectives_scaled = self.minmax_scale(objectives, mean_valids)
+            # Other metrics can be scaled independently
+            mean_valids_scaled = self.minmax_scale(mean_valids)
+            objectives_scaled = self.minmax_scale(objectives)
+            gap_penalties_scaled = self.minmax_scale(gap_penalties)
+            complexity_penalties_scaled = self.minmax_scale(complexity_penalties)
+            reg_rewards_scaled = self.minmax_scale(reg_rewards)
+            n_features_scaled = self.minmax_scale(n_features_list)
+
+            pltx.plot(trial_nums, mean_valids_scaled, label='mean_valid', color='green+', marker='braille')
+            pltx.plot(trial_nums, gap_penalties_scaled, label='gap_penalty', color='cyan+', marker='braille')
+            pltx.plot(trial_nums, complexity_penalties_scaled, label='complexity_penalty', color='blue+', marker='braille')
+            pltx.plot(trial_nums, reg_rewards_scaled, label='reg_reward', color='magenta+', marker='braille')
+            pltx.plot(trial_nums, objectives_scaled, label='objective', color='orange+', marker='braille')
+            pltx.plot(trial_nums, n_features_scaled, label='n_features', color='white', marker='dot')
+
+            pltx.title('Optuna Objectives (Live, Scaled)')
             pltx.xlabel('Trial')
-            pltx.ylabel('Value')
+            pltx.ylabel('Scaled Value')
             pltx.canvas_color('black')
             pltx.axes_color('black')
             pltx.ticks_color('grey')
-            # pltx.grid_color('grey')
             pltx.grid(True)
+
+            if (top_string):
+                print(top_string)
+
             pltx.show()
+
+            # Add custom axis labels using ANSI escape codes (after plot)
+            # Move cursor up 15 lines (approximate, adjust as needed)
+            # import sys
+            # sys.stdout.write('\033[15A')  # Move up 15 lines
+            # sys.stdout.write(' ' * 2 + '▲ mean_valid\n')
+            # sys.stdout.write(' ' * 2 + '▲ objective\n')
+            # sys.stdout.write(' ' * 2 + '▲ gap_penalty\n')
+            # sys.stdout.write(' ' * 2 + '▲ complexity_penalty\n')
+            # sys.stdout.write(' ' * 2 + '▲ reg_reward\n')
+            # sys.stdout.write(' ' * 2 + '▲ n_features\n')
+            # sys.stdout.flush()
 
     def close(self):
         self.pbar.close()
