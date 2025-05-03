@@ -640,7 +640,7 @@ class TqdmOptunaCallback:
         sep = "!" if trial.number == self.best_trial_number else ":"
 
         msg = (
-            f"Trial {trial.number} | Best{sep} {self.best_trial_number} | objective: {fmt(objective_val)} | mean_valid: {fmt(mean_valid)} | gap: {fmt(generalization_gap)} | "
+            f"Trial {trial.number} | Best{sep} Trial {self.best_trial_value}: {self.best_trial_number} | objective: {fmt(objective_val)} | mean_valid: {fmt(mean_valid)} | gap: {fmt(generalization_gap)} | "
             f"features: {fmt(n_features)} | num_leaves: {fmt(num_leaves)} | max_depth: {fmt(max_depth)} | "
             f"lambda_l1: {fmt(lambda_l1)} | lambda_l2: {fmt(lambda_l2)}"
         )
