@@ -592,6 +592,22 @@ class TqdmOptunaCallback:
         self.study = study
         self.terminal_height = None
         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=False)
+        # Track best trial number and value for display
+        self.best_trial_number = None
+        self.best_trial_value = float('inf')
+        # Try to initialize from study if available
+        if study is not None:
+            try:
+                # For multi-objective, use first value
+                if hasattr(study, 'best_trials') and study.best_trials:
+                    self.best_trial_number = study.best_trials[0].number
+                    self.best_trial_value = study.best_trials[0].values[0] if hasattr(study.best_trials[0], 'values') else study.best_trials[0].value
+                elif hasattr(study, 'best_trial') and study.best_trial is not None:
+                    self.best_trial_number = study.best_trial.number
+                    self.best_trial_value = study.best_trial.value
+            except Exception:
+                pass
+
 
     def __call__(self, study, trial):
         self.pbar.update(1)
@@ -599,21 +615,43 @@ class TqdmOptunaCallback:
         max_depth = trial.params.get('max_depth', None)
         lambda_l1 = trial.params.get('lambda_l1', None)
         lambda_l2 = trial.params.get('lambda_l2', None)
-        mean_train = trial.user_attrs.get('mean_train', None)
         mean_valid = trial.user_attrs.get('mean_valid', None)
         generalization_gap = trial.user_attrs.get('generalization_gap', None)
         n_features = trial.user_attrs.get('n_features', None)
         objective_val = trial.user_attrs.get('objective', None)
+
+        # Update best trial number/value if this trial is better (minimize objective)
+        # Use objective_val if available, else mean_valid
+        try:
+            val = float(objective_val) if objective_val is not None else (float(mean_valid) if mean_valid is not None else None)
+            if val is not None and val < self.best_trial_value:
+                self.best_trial_value = val
+                self.best_trial_number = trial.number
+        except Exception:
+            pass
+
+        def fmt(x):
+            if x is None:
+                return 'None'
+            if isinstance(x, float):
+                return f"{x:.6f}"
+            return str(x)
+
+        sep = "!" if trial.number == self.best_trial_number else ":"
+
         msg = (
-            f"Trial {trial.number} | mean_valid: {mean_valid} | gap: {generalization_gap} | "
-            f"objective: {objective_val} | features: {n_features} | num_leaves: {num_leaves} | max_depth: {max_depth} | "
-            f"lambda_l1: {lambda_l1} | lambda_l2: {lambda_l2}"
+            f"Trial {trial.number} | Best{sep} {self.best_trial_number} | objective: {fmt(objective_val)} | mean_valid: {fmt(mean_valid)} | gap: {fmt(generalization_gap)} | "
+            f"features: {fmt(n_features)} | num_leaves: {fmt(num_leaves)} | max_depth: {fmt(max_depth)} | "
+            f"lambda_l1: {fmt(lambda_l1)} | lambda_l2: {fmt(lambda_l2)}"
         )
+        # Color green if this is the best trial so far
+        if trial.number == self.best_trial_number:
+            msg = f"\033[92m{msg}\033[0m"
 
         # Live ASCII plot using plotext, with progress bar handling
         if trial.number % self.print_every == 0:
             import plotext as pltx
-            
+
             start_t = getattr(self.pbar, 'start_t', None)
 
             self.pbar.close()  # Close progress bar before plotting
