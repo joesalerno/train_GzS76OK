@@ -1,7 +1,6 @@
 import time
 import plotext as pltx  # For live ASCII plotting in the console
 
-
 import warnings
 warnings.filterwarnings("ignore", message="The reported value is ignored because this `step` .* is already reported.")
 
@@ -37,9 +36,9 @@ SEED = 42
 LAG_WEEKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.75
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0004
-OBJECTIVE_WEIGHT_REG_REWARD = 0.00075
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0.2
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0001
+OBJECTIVE_WEIGHT_REG_REWARD = 0.001
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
@@ -647,8 +646,8 @@ class TqdmOptunaCallback:
         sep = "!" if trial.number == self.best_trial_number else ":"
 
         msg = (
-            f"Trial {trial.number} | Best{sep} Trial {self.best_trial_number}: {self.best_trial_value} | Objective: {fmt(objective_val)} | Mean Valid: {fmt(mean_valid)} | Gap: {fmt(generalization_gap)} | "
-            f"Features: {fmt(n_features)} | Num Leaves: {fmt(num_leaves)} | Max Depth: {fmt(max_depth)} | "
+            f"Trial {trial.number} | Best{sep} Trial {self.best_trial_number}: {fmt(self.best_trial_value)} | Objective: {fmt(objective_val)} | Mean Valid: {fmt(mean_valid)} | Gap: {fmt(generalization_gap)} | "
+            f"Features: {n_features} | Num Leaves: {fmt(num_leaves)} | Max Depth: {fmt(max_depth)} | "
             f"Lambda L1: {fmt(lambda_l1)} | Lambda L2: {fmt(lambda_l2)}"
         )
         # Color green if this is the best trial so far
@@ -704,6 +703,13 @@ class TqdmOptunaCallback:
                 n_features = t.user_attrs.get('n_features', None)
                 n_features_list.append(n_features)
 
+        # Min-max scaling helper
+        def minmax(lst):
+            if not lst or min(lst) == max(lst):
+                return [0.5 for _ in lst]
+            mn, mx = min(lst), max(lst)
+            return [(x - mn) / (mx - mn) for x in lst]
+
         # Limit to most recent trials based on console width (at most 1 trial per character)
         if trial_nums:
             try:
@@ -721,15 +727,25 @@ class TqdmOptunaCallback:
                 objectives = objectives[-console_width:]
                 n_features_list = n_features_list[-console_width:]
 
-            pltx.plot(trial_nums, gap_penalties, label='gap_penalty', color='cyan+', marker='braille')
-            pltx.plot(trial_nums, complexity_penalties, label='complexity_penalty', color='blue+', marker='braille')
-            pltx.plot(trial_nums, reg_rewards, label='reg_reward', color='magenta+', marker='braille')
-            pltx.plot(trial_nums, mean_valids, label='mean_valid', color='green+', marker='braille')
-            pltx.plot(trial_nums, objectives, label='objective', color='orange+', marker='braille')
+            # Min-max scale all objectives
+            gap_penalties_scaled = minmax(gap_penalties)
+            complexity_penalties_scaled = minmax(complexity_penalties)
+            reg_rewards_scaled = minmax(reg_rewards)
+            mean_valids_scaled = minmax(mean_valids)
+            objectives_scaled = minmax(objectives)
+
+            # Label for mean_valid's value (last trial)
+            mean_valid_label = f"mean_valid (last: {mean_valids[-1]:.4f})" if mean_valids else "mean_valid"
+
+            pltx.plot(trial_nums, gap_penalties_scaled, label='gap_penalty (minmax)', color='cyan+', marker='braille')
+            pltx.plot(trial_nums, complexity_penalties_scaled, label='complexity_penalty (minmax)', color='blue+', marker='braille')
+            pltx.plot(trial_nums, reg_rewards_scaled, label='reg_reward (minmax)', color='magenta+', marker='braille')
+            pltx.plot(trial_nums, mean_valids_scaled, label=mean_valid_label, color='green+', marker='braille')
+            pltx.plot(trial_nums, objectives_scaled, label='objective (minmax)', color='orange+', marker='braille')
 
             pltx.title('Optuna Objectives (Live)')
             pltx.xlabel('Trial')
-            pltx.ylabel('Value')
+            pltx.ylabel('Minmax Scaled Value')
             pltx.canvas_color('black')
             pltx.axes_color('black')
             pltx.ticks_color('grey')
