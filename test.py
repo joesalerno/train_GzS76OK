@@ -34,10 +34,12 @@ TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
-LAG_WEEKS = [1]
-ROLLING_WINDOWS = [2]
-# LAG_WEEKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-# ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
+LAG_WEEKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
+OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
+OBJECTIVE_WEIGHT_GAP_PENALTY = 5.0
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.01
+OBJECTIVE_WEIGHT_REG_REWARD = 0.05
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
@@ -334,13 +336,11 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
         if overfit_count[0] >= overfit_rounds:
             if verbose:
                 print(f"Stopping early due to overfitting at iteration {env.iteration}")
-            # return optuna.TrialPruned()
             raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
         # Standard early stopping
         if env.iteration - best_iter[0] >= stopping_rounds:
             if verbose:
                 print(f"Stopping early due to no improvement at iteration {env.iteration}")
-            # return optuna.TrialPruned()
             raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
     return _callback
 
@@ -506,7 +506,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     selected_features = list(dict.fromkeys(selected_features))
     if len(selected_features) < 10:
         logging.warning(f"Optuna selected {len(selected_features)} features, which is less than 10. This may lead to overfitting.")
-        return optuna.TrialPruned()
+        raise optuna.TrialPruned()
 
     # Use rolling window group time series split
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
@@ -546,21 +546,23 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     generalization_gap = mean_valid - mean_train
 
     # --- Penalty terms as separate objectives ---
-    gap_penalty = max(0, generalization_gap) * 2.0  # Weight can be tuned. Higher weight = more penalty for overfitting
-    complexity_penalty = 0.01 * len(selected_features)
-    complexity_penalty += 0.01 * params['num_leaves']
-    complexity_penalty += 0.01 * (params['max_depth'] if params['max_depth'] > 0 else 0)
-    reg_reward = 0.01 * (params['lambda_l1'] + params['lambda_l2'])
+    valid_reward = OBJECTIVE_WEIGHT_MEAN_VALID * mean_valid
+    gap_penalty = OBJECTIVE_WEIGHT_GAP_PENALTY * max(0, generalization_gap)  # Weight can be tuned. Higher weight = more penalty for overfitting
+    complexity_penalty = OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * len(selected_features)
+    complexity_penalty += OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * params['num_leaves']
+    complexity_penalty += OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * (params['max_depth'] if params['max_depth'] > 0 else 0)
+    reg_reward = OBJECTIVE_WEIGHT_REG_REWARD * (params['lambda_l1'] + params['lambda_l2'])
 
     # Store metrics for logging in callback
     trial.set_user_attr('mean_train', float(mean_train))
     trial.set_user_attr('mean_valid', float(mean_valid))
     trial.set_user_attr('generalization_gap', float(generalization_gap))
+    trial.set_user_attr('valid_reward', float(valid_reward))
     trial.set_user_attr('gap_penalty', float(gap_penalty))
     trial.set_user_attr('complexity_penalty', float(complexity_penalty))
     trial.set_user_attr('reg_reward', float(reg_reward))
     # Store selected features and objective value for callback/plotting
-    trial.set_user_attr('selected_features', selected_features)
+    trial.set_user_attr('n_features', float(len(selected_features)))
     objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
     trial.set_user_attr('objective', objective_val)
 
@@ -569,10 +571,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     objectives = [mean_valid, gap_penalty, complexity_penalty, -reg_reward]
     if any(np.isnan(obj) or np.isinf(obj) for obj in objectives):
         logging.warning(f"Optuna trial {trial.number} produced invalid objectives: {objectives}.")
-        if isinstance(directions, list) and len(directions) > 1:
-            return tuple([float('inf')] * len(directions))
-        else:
-            return float('inf')
+        raise optuna.TrialPruned()
 
     # Return correct type for single- or multi-objective
     if isinstance(directions, list) and len(directions) > 1:
@@ -586,20 +585,6 @@ logging.info("Starting Optuna feature+hyperparam selection...")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 class TqdmOptunaCallback:
-    def minmax_scale(self, arr, arr2=None):
-        # arr2: if provided, scale both arrays together using their combined min/max
-        arr_clean = [v for v in arr if v is not None]
-        if arr2 is not None:
-            arr2_clean = [v for v in arr2 if v is not None]
-            all_vals = arr_clean + arr2_clean
-        else:
-            all_vals = arr_clean
-        if not all_vals:
-            return arr
-        min_v, max_v = min(all_vals), max(all_vals)
-        if min_v == max_v:
-            return [0.5 for _ in arr]
-        return [(v - min_v) / (max_v - min_v) if v is not None else None for v in arr]
     def __init__(self, n_trials, study=None, print_every=1):
         self.n_trials = n_trials
         self.print_every = print_every
@@ -616,7 +601,7 @@ class TqdmOptunaCallback:
         mean_train = trial.user_attrs.get('mean_train', None)
         mean_valid = trial.user_attrs.get('mean_valid', None)
         generalization_gap = trial.user_attrs.get('generalization_gap', None)
-        n_features = len(trial.user_attrs.get('selected_features', []))
+        n_features = trial.user_attrs.get('n_features', None)
         objective_val = trial.user_attrs.get('objective', None)
         msg = (
             f"Trial {trial.number} | mean_valid: {mean_valid} | gap: {generalization_gap} | "
@@ -644,6 +629,7 @@ class TqdmOptunaCallback:
 
             self.pbar.refresh()
 
+
     def live_plot_objectives(self, trials, top_string):
         pltx.clf()
         trial_nums = []
@@ -660,33 +646,37 @@ class TqdmOptunaCallback:
                 gap_penalties.append(t.values[1])
                 complexity_penalties.append(t.values[2])
                 reg_rewards.append(-t.values[3])  # Negated because you minimize -reg_reward
-                # Use user_attrs for objective and selected_features if available
                 obj = t.user_attrs.get('objective', None)
                 objectives.append(obj)
-                n_features = len(t.user_attrs.get('selected_features', []))
+                n_features = t.user_attrs.get('n_features', None)
                 n_features_list.append(n_features)
+
+        # Limit to most recent trials based on console width (at most 1 trial per character)
         if trial_nums:
-            # Min-max scale mean_valids and objectives together for label spacing
-            # mean_valids_scaled = self.minmax_scale(mean_valids, objectives)
-            # objectives_scaled = self.minmax_scale(objectives, mean_valids)
-            # Other metrics can be scaled independently
-            mean_valids_scaled = self.minmax_scale(mean_valids)
-            objectives_scaled = self.minmax_scale(objectives)
-            gap_penalties_scaled = self.minmax_scale(gap_penalties)
-            complexity_penalties_scaled = self.minmax_scale(complexity_penalties)
-            reg_rewards_scaled = self.minmax_scale(reg_rewards)
-            n_features_scaled = self.minmax_scale(n_features_list)
+            try:
+                console_width = pltx.terminal_width()
+            except Exception:
+                console_width = 80  # Fallback if plotext fails
+            n = len(trial_nums)
+            if n > console_width:
+                # Keep only the most recent trials, at most 1 per character
+                trial_nums = trial_nums[-console_width:]
+                mean_valids = mean_valids[-console_width:]
+                gap_penalties = gap_penalties[-console_width:]
+                complexity_penalties = complexity_penalties[-console_width:]
+                reg_rewards = reg_rewards[-console_width:]
+                objectives = objectives[-console_width:]
+                n_features_list = n_features_list[-console_width:]
 
-            pltx.plot(trial_nums, mean_valids_scaled, label='mean_valid', color='green+', marker='braille')
-            pltx.plot(trial_nums, gap_penalties_scaled, label='gap_penalty', color='cyan+', marker='braille')
-            pltx.plot(trial_nums, complexity_penalties_scaled, label='complexity_penalty', color='blue+', marker='braille')
-            pltx.plot(trial_nums, reg_rewards_scaled, label='reg_reward', color='magenta+', marker='braille')
-            pltx.plot(trial_nums, objectives_scaled, label='objective', color='orange+', marker='braille')
-            pltx.plot(trial_nums, n_features_scaled, label='n_features', color='white', marker='dot')
+            pltx.plot(trial_nums, gap_penalties, label='gap_penalty', color='cyan+', marker='braille')
+            pltx.plot(trial_nums, complexity_penalties, label='complexity_penalty', color='blue+', marker='braille')
+            pltx.plot(trial_nums, reg_rewards, label='reg_reward', color='magenta+', marker='braille')
+            pltx.plot(trial_nums, mean_valids, label='mean_valid', color='green+', marker='braille')
+            pltx.plot(trial_nums, objectives, label='objective', color='orange+', marker='braille')
 
-            pltx.title('Optuna Objectives (Live, Scaled)')
+            pltx.title('Optuna Objectives (Live)')
             pltx.xlabel('Trial')
-            pltx.ylabel('Scaled Value')
+            pltx.ylabel('Value')
             pltx.canvas_color('black')
             pltx.axes_color('black')
             pltx.ticks_color('grey')
@@ -697,84 +687,8 @@ class TqdmOptunaCallback:
 
             pltx.show()
 
-            # Add custom axis labels using ANSI escape codes (after plot)
-            # Move cursor up 15 lines (approximate, adjust as needed)
-            # import sys
-            # sys.stdout.write('\033[15A')  # Move up 15 lines
-            # sys.stdout.write(' ' * 2 + '▲ mean_valid\n')
-            # sys.stdout.write(' ' * 2 + '▲ objective\n')
-            # sys.stdout.write(' ' * 2 + '▲ gap_penalty\n')
-            # sys.stdout.write(' ' * 2 + '▲ complexity_penalty\n')
-            # sys.stdout.write(' ' * 2 + '▲ reg_reward\n')
-            # sys.stdout.write(' ' * 2 + '▲ n_features\n')
-            # sys.stdout.flush()
-
     def close(self):
         self.pbar.close()
-
-# class TqdmOptunaCallback:
-#     def __init__(self, n_trials, study=None, print_every=1):
-#         self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
-#         self.print_every = print_every
-#         # Initialize best_value and best_trial from study if available
-#         if study is not None:
-#             try:
-#                 if study.best_trial is not None and study.best_trial.value is not None:
-#                     self.best_value = study.best_trial.value
-#                     self.best_trial = study.best_trial.number
-#                 else:
-#                     self.best_value = float('inf')
-#                     self.best_trial = None
-#             except Exception:
-#                 self.best_value = float('inf')
-#                 self.best_trial = None
-#         else:
-#             self.best_value = float('inf')
-#             self.best_trial = None
-#     def __call__(self, study, trial):
-#         self.pbar.update(1)
-#         # Extract best trial info
-#         best_trial = study.best_trial if study.best_trial is not None else None
-#         best_trial_num = best_trial.number if best_trial is not None else None
-#         best_trial_val = best_trial.value if best_trial is not None else None
-
-#         # Extract this trial's info
-#         trial_num = trial.number
-#         trial_val = trial.value
-#         params = trial.params
-
-#         # Extract scores and gap from trial's user_attrs (set in objective)
-#         mean_train = trial.user_attrs.get('mean_train', None)
-#         mean_valid = trial.user_attrs.get('mean_valid', None)
-#         generalization_gap = trial.user_attrs.get('generalization_gap', None)
-
-#         # Number of selected features
-#         n_features = sum([v for k, v in params.items() if isinstance(v, bool) and v])
-
-#         # Main hyperparameters
-#         num_leaves = params.get('num_leaves', None)
-#         max_depth = params.get('max_depth', None)
-#         lambda_l1 = params.get('lambda_l1', None)
-#         lambda_l2 = params.get('lambda_l2', None)
-
-#         # Format values for pretty printing
-#         def fmt(val, prec=5):
-#             if val is None:
-#                 return 'None'
-#             if isinstance(val, float):
-#                 return f"{val:.{prec}f}"
-#             return str(val)
-
-#         msg = (
-#             f"Trial {trial_num} | Obj: {fmt(trial_val)} | "
-#             f"Train: {fmt(mean_train)} | Valid: {fmt(mean_valid)} | Gap: {fmt(generalization_gap)} | "
-#             f"Features: {n_features} | num_leaves: {num_leaves} | max_depth: {max_depth} | "
-#             f"lambda_l1: {fmt(lambda_l1,3)} | lambda_l2: {fmt(lambda_l2,3)} | "
-#             f"Best so far: #{best_trial_num} ({fmt(best_trial_val)})"
-#         )
-#         tqdm.write(msg)
-#     def close(self):
-#         self.pbar.close()
 
 # Create the study 
 
@@ -804,7 +718,8 @@ else:
         )
     else:
         pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=N_WARMUP_STEPS)
-    directions = "minimize"  # Single-objective
+    directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
+    # directions = "minimize"  # Single-objective
 
 feature_hyperparam_study = optuna.create_study(
     directions=directions,
@@ -816,6 +731,8 @@ feature_hyperparam_study = optuna.create_study(
 )
 
 # Pass the study to the callback so it can initialize best_value/best_trial
+
+print (f"Optuna study name: {OPTUNA_STUDY_NAME}")
 
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
 try:
@@ -831,6 +748,13 @@ except KeyboardInterrupt:
 except Exception as e:
     logging.warning(f"Optuna optimization failed: {e}")
 
+if hasattr(feature_hyperparam_study, 'best_trials') and feature_hyperparam_study.best_trials:
+    print("Optuna study completed. Best trials:")
+    for i, t in enumerate(feature_hyperparam_study.best_trials):
+        print(f"  Pareto {i}: trial #{t.number}, values={t.values}")
+else:
+    print("Optuna study completed. No best trials found.")
+
 # Close the progress bar
 optuna_callback.close()
 
@@ -843,6 +767,7 @@ feature_hyperparam_study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, stora
 df_trials = feature_hyperparam_study.trials_dataframe()
 value_cols = [col for col in df_trials.columns if col.startswith('values_')]
 if value_cols:
+    
     print(df_trials[['number'] + value_cols + ['state']].sort_values(value_cols[0]).head(20))
     print("Best value_0 among COMPLETE trials:", df_trials[df_trials['state'] == 'COMPLETE'][value_cols[0]].min())
     print("Best value_0 among ALL trials:", df_trials[value_cols[0]].min())
