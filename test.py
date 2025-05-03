@@ -38,9 +38,9 @@ SEED = 42
 LAG_WEEKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 5
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0035
-OBJECTIVE_WEIGHT_REG_REWARD = 0.005
+OBJECTIVE_WEIGHT_GAP_PENALTY = 4
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0025
+OBJECTIVE_WEIGHT_REG_REWARD = 0.004
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
@@ -575,10 +575,12 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         raise optuna.TrialPruned()
 
     # Return correct type for single- or multi-objective
-    if isinstance(directions, list) and len(directions) > 1:
-        return tuple(objectives)
-    else:
-        return objectives[0]
+    # if isinstance(directions, list) and len(directions) > 1:
+    #     return tuple(objectives)
+    # else:
+    #     return objectives[0]
+
+    return objectives
 
 logging.info("Starting Optuna feature+hyperparam selection...")
 
@@ -768,7 +770,7 @@ else:
             interval_steps=1,
         )
     else:
-        pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=N_WARMUP_STEPS)
+        pruner = optuna.pruners.NopPruner() # No pruning
     directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
     # directions = "minimize"  # Single-objective
 
