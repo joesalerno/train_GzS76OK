@@ -598,8 +598,13 @@ class TqdmOptunaCallback:
         # Try to initialize from study if available
         if study is not None:
             try:
-                # For multi-objective, use first value
-                if hasattr(study, 'best_trials') and study.best_trials:
+                # Find the best trial by minimum objective value (not just study.best_trial, which may be incomplete)
+                trials = [t for t in getattr(study, 'trials', []) if hasattr(t, 'user_attrs') and 'objective' in t.user_attrs]
+                if trials:
+                    best = min(trials, key=lambda t: t.user_attrs['objective'] if t.user_attrs['objective'] is not None else float('inf'))
+                    self.best_trial_number = best.number
+                    self.best_trial_value = best.user_attrs['objective']
+                elif hasattr(study, 'best_trials') and study.best_trials:
                     self.best_trial_number = study.best_trials[0].number
                     self.best_trial_value = study.best_trials[0].values[0] if hasattr(study.best_trials[0], 'values') else study.best_trials[0].value
                 elif hasattr(study, 'best_trial') and study.best_trial is not None:
@@ -640,9 +645,9 @@ class TqdmOptunaCallback:
         sep = "!" if trial.number == self.best_trial_number else ":"
 
         msg = (
-            f"Trial {trial.number} | Best{sep} Trial {self.best_trial_value}: {self.best_trial_number} | objective: {fmt(objective_val)} | mean_valid: {fmt(mean_valid)} | gap: {fmt(generalization_gap)} | "
-            f"features: {fmt(n_features)} | num_leaves: {fmt(num_leaves)} | max_depth: {fmt(max_depth)} | "
-            f"lambda_l1: {fmt(lambda_l1)} | lambda_l2: {fmt(lambda_l2)}"
+            f"Trial {trial.number} | Best{sep} Trial {self.best_trial_number}: {self.best_trial_value} | Objective: {fmt(objective_val)} | Mean Valid: {fmt(mean_valid)} | Gap: {fmt(generalization_gap)} | "
+            f"Features: {fmt(n_features)} | Num Leaves: {fmt(num_leaves)} | Max Depth: {fmt(max_depth)} | "
+            f"Lambda L1: {fmt(lambda_l1)} | Lambda L2: {fmt(lambda_l2)}"
         )
         # Color green if this is the best trial so far
         if trial.number == self.best_trial_number:
