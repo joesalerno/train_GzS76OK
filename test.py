@@ -1,3 +1,4 @@
+import time
 import plotext as pltx  # For live ASCII plotting in the console
 
 
@@ -590,7 +591,7 @@ class TqdmOptunaCallback:
         self.print_every = print_every
         self.study = study
         self.terminal_height = None
-        self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=True)
+        self.pbar = tqdm(total=n_trials, desc="Optuna Trials", position=0, leave=False)
 
     def __call__(self, study, trial):
         self.pbar.update(1)
@@ -613,6 +614,8 @@ class TqdmOptunaCallback:
         if trial.number % self.print_every == 0:
             import plotext as pltx
             
+            start_t = getattr(self.pbar, 'start_t', None)
+
             self.pbar.close()  # Close progress bar before plotting
 
             # Clear previous plot lines
@@ -626,6 +629,11 @@ class TqdmOptunaCallback:
 
             self.pbar = tqdm(total=self.n_trials, desc="Optuna Trials", position=0, leave=False)
             self.pbar.n = trial.number + 1  # Restore progress
+
+            # Restore the original start time for correct elapsed/ETA display
+            if start_t is not None:
+                self.pbar.start_t = start_t
+                self.pbar.last_print_t = time.time()  # Force immediate refresh
 
             self.pbar.refresh()
 
