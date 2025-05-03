@@ -19,7 +19,6 @@ from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, Gro
 from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
 from optuna.integration import LightGBMPruningCallback
 from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
-from optuna.samplers import NSGAIISampler, TPESampler
 import shap
 
 import re
@@ -46,8 +45,9 @@ OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
-OPTUNA_SAMPLER = "Default"
-#OPTUNA_SAMPLER = "NSGAIISampler"
+#OPTUNA_SAMPLER = "Default"
+# OPTUNA_SAMPLER = "NSGAIISampler"
+OPTUNA_SAMPLER = "NSGAIIISampler"
 PRUNING_ENABLED = False # Enable Optuna pruning
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
@@ -513,7 +513,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
-    if not PRUNING_ENABLED or OPTUNA_SAMPLER == "NSGAIISampler":
+    if not PRUNING_ENABLED or OPTUNA_SAMPLER == "NSGAIISampler" or OPTUNA_SAMPLER == "NSGAIIISampler":
         callbacks = [
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
         ]  # No pruning callback
@@ -748,7 +748,7 @@ class TqdmOptunaCallback:
 optuna_storage = OPTUNA_DB
 
 if OPTUNA_SAMPLER == "NSGAIISampler":
-    sampler = NSGAIISampler(
+    sampler = optuna.samplers.NSGAIISampler(
         seed=SEED,
         population_size=POPULATION_SIZE,
         crossover=UniformCrossover(),
@@ -756,6 +756,16 @@ if OPTUNA_SAMPLER == "NSGAIISampler":
         swapping_prob=0.5,
     )
     pruner = optuna.pruners.NopPruner()  # Pruning not supported for multi-objective
+    directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
+elif OPTUNA_SAMPLER == "NSGAIIISampler":
+    sampler = optuna.samplers.NSGAIIISampler(
+        seed=SEED,
+        population_size=POPULATION_SIZE,
+        crossover=UniformCrossover(),
+        crossover_prob=0.9,
+        swapping_prob=0.5,
+    )
+    pruner = optuna.pruners.NopPruner()
     directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
 else:
     sampler = optuna.samplers.TPESampler(
