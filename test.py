@@ -37,17 +37,17 @@ import random
 SEED = random.randint(0, 1000000) # Random seed distributed for each run
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.05
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.00005
-OBJECTIVE_WEIGHT_REG_REWARD = 0.001
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0 #0.05
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0 #0.00005
+OBJECTIVE_WEIGHT_REG_REWARD = 0 #0.001
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 17 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 200 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
-# OPTUNA_SAMPLER = "Default"
+OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
-OPTUNA_SAMPLER = "NSGAIIISampler"
+# OPTUNA_SAMPLER = "NSGAIIISampler"
 PRUNING_ENABLED = True # Enable Optuna pruning
 # PRUNING_ENABLED = False
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
@@ -891,6 +891,10 @@ if OPTUNA_SAMPLER == "NSGAIISampler":
         swapping_prob=0.5,
     )
     pruner = optuna.pruners.NopPruner()  # Pruning not supported for multi-objective
+    if hasattr(feature_hyperparam_study, "directions") and len(feature_hyperparam_study.directions) > 1:
+        directions = feature_hyperparam_study.directions
+    else:
+        directions = ["minimize"]  # Single-objective
     directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
 elif OPTUNA_SAMPLER == "NSGAIIISampler":
     sampler = optuna.samplers.NSGAIIISampler(
