@@ -36,10 +36,11 @@ CENTER_INFO_PATH = "fulfilment_center_info.csv"
 import random
 SEED = random.randint(0, 1000000) # Random seed distributed for each run
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
+OPTUNA_MULTI_OBJECTIVE = False  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0 #0.05
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0 #0.00005
-OBJECTIVE_WEIGHT_REG_REWARD = 0 #0.001
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0.05
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.00005
+OBJECTIVE_WEIGHT_REG_REWARD = 0.001
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 17 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
@@ -448,7 +449,25 @@ class RollingGroupTimeSeriesSplit:
             val_indices = np.where(val_mask & pd.notnull(groups))[0]
             yield train_indices, val_indices
 
+
 # --- Feature Selection and Hyperparameter Tuning with Optuna ---
+
+# --- Optuna study creation: handle single/multi-objective directions ---
+import optuna
+if OPTUNA_MULTI_OBJECTIVE:
+    study = optuna.create_study(
+        study_name=OPTUNA_STUDY_NAME,
+        directions=['minimize', 'minimize', 'minimize', 'minimize'],
+        storage=OPTUNA_DB,
+        load_if_exists=True
+    )
+else:
+    study = optuna.create_study(
+        study_name=OPTUNA_STUDY_NAME,
+        direction='minimize',
+        storage=OPTUNA_DB,
+        load_if_exists=True
+    )
 
 # --- Precompute eligible features and all possible combos for Optuna feature interactions (module-level, before study) ---
 
@@ -580,13 +599,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
-    is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
-    # if not PRUNING_ENABLED or OPTUNA_SAMPLER in ["NSGAIISampler", "NSGAIIISampler"]:
     if not PRUNING_ENABLED:
         callbacks = [
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
         ]  # No pruning callback
-    elif is_multi_objective:
+    elif OPTUNA_MULTI_OBJECTIVE:
         callbacks = [
             CustomPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
@@ -639,7 +656,10 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     trial.set_user_attr('reg_reward', float(reg_reward))
     # Store selected features and objective value for callback/plotting
     trial.set_user_attr('n_features', float(len(selected_features)))
-    objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
+    if (OPTUNA_MULTI_OBJECTIVE):
+        objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
+    else:
+        objective_val = mean_valid
     trial.set_user_attr('objective', objective_val)
 
     # Multi-objective: minimize mean_valid, gap_penalty, complexity_penalty, maximize reg_reward (so minimize -reg_reward)
@@ -649,13 +669,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         logging.warning(f"Optuna trial {trial.number} produced invalid objectives: {objectives}.")
         raise optuna.TrialPruned()
 
-    # Return correct type for single- or multi-objective
-    # if isinstance(directions, list) and len(directions) > 1:
-    #     return tuple(objectives)
-    # else:
-    #     return objectives[0]
-
-    return objectives
+    # Configurable: single or multi-objective return
+    if OPTUNA_MULTI_OBJECTIVE:
+        return objectives
+    else:
+        return objectives[0]
 
 logging.info("Starting Optuna feature+hyperparam selection...")
 
