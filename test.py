@@ -737,7 +737,8 @@ class TqdmOptunaCallback:
 
         msg = (
             f"Trial {trial.number} | Best Trial{sep} {self.best_trial_number} ({fmt(self.best_trial_value)}) | Objective: {fmt(objective_val)} | Mean Valid: {fmt(mean_valid)} | Gap: {fmt(generalization_gap)} | "
-            f"Features: {int(n_features)} | Num Leaves: {fmt(num_leaves)} | Max Depth: {fmt(max_depth)} | "
+            f"Features: {int(n_features) if n_features is not None else 'None'} | "
+            f"Num Leaves: {fmt(num_leaves)} | Max Depth: {fmt(max_depth)} | "
             f"L1: {fmt(lambda_l1)} | L2: {fmt(lambda_l2)}"
         )
         # Color green if this is the best trial so far
