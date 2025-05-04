@@ -508,6 +508,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         'metric': 'rmsle',
     }
     print(f"[DEBUG] params: {params}")
+    
     # Find all features with sin/cos in their name (excluding those already in a pair)
     sincos_features = [f for f in FEATURES if re.search(r'(_sin|_cos)', f)]
     pair_map = {}
@@ -524,6 +525,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             selected_features.extend([sin, cos])
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
+    
     print(f"[DEBUG] selected_features after sin/cos and base: {selected_features}")
     print(f"[DEBUG] Starting feature interaction selection...")
     print(f"[DEBUG] selected_features after interactions: {selected_features}")
@@ -934,19 +936,19 @@ else:
     )
     # For single-objective, you can use any of the objectives, e.g. mean_valid
     if PRUNING_ENABLED:
-        # pruner = optuna.pruners.MedianPruner(
-        #     n_startup_trials=5,
-        #     n_warmup_steps=N_WARMUP_STEPS,
-        #     n_min_trials=5,
-        #     interval_steps=1,
-        # )
-        pruner = optuna.pruners.HyperbandPruner(
-            min_resource=1,           # Minimum number of iterations/training steps before pruning
-            max_resource=300,         # Maximum number of iterations (matches early stopping rounds)
-            reduction_factor=3,       # How aggressively to halve trials (3 is a good default)
-            bootstrap_count=0         # No bootstrapping, start pruning immediately
-            
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=5,
+            n_warmup_steps=N_WARMUP_STEPS,
+            n_min_trials=5,
+            interval_steps=1,
         )
+        # pruner = optuna.pruners.HyperbandPruner(
+        #     min_resource=1,           # Minimum number of iterations/training steps before pruning
+        #     max_resource=300,         # Maximum number of iterations (matches early stopping rounds)
+        #     reduction_factor=3,       # How aggressively to halve trials (3 is a good default)
+        #     bootstrap_count=0         # No bootstrapping, start pruning immediately
+            
+        # )
     else:
         pruner = optuna.pruners.NopPruner() # No pruning
     # directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
