@@ -473,28 +473,28 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Hyperparameter search space
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
     if boosting_type != 'goss':
-        bagging_fraction = trial.suggest_float('bagging_fraction', 0.8, 1.0)  # ↑ Min value for more regularization
+        bagging_fraction = trial.suggest_float('bagging_fraction', 0.5, 1.0)  # Lower min for more regularization (helps generalization)
         bagging_freq = trial.suggest_int('bagging_freq', 0, 10)
     else:
         bagging_fraction = 1.0
         bagging_freq = 0
     params = {
-        'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.2, log=True), # Lower for less overfit
-        'num_leaves': trial.suggest_int('num_leaves', 4, 128), # Lower for less complexity
-        'max_depth': trial.suggest_int('max_depth', 2, 12),    # Lower for less complexity
-        'feature_fraction': trial.suggest_float('feature_fraction', 0.3, 1.0),  # ↑ Min value
+        'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.5, log=True), # Higher max allows faster learning, but can overfit if too high
+        'num_leaves': trial.suggest_int('num_leaves', 4, 512), # Higher max allows more complex trees, but can overfit
+        'max_depth': trial.suggest_int('max_depth', 2, 30),    # Higher max allows deeper trees, but can overfit
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.1, 1.0),  # Lower min increases regularization, helps generalization
         'bagging_fraction': bagging_fraction,
         'bagging_freq': bagging_freq,
-        'min_child_samples': trial.suggest_int('min_child_samples', 10, 1000), # ↑ Min value
-        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 100.0, log=True), # ↑ Min value, must be >0 for log
-        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 100.0, log=True), # ↑ Min value, must be >0 for log
+        'min_child_samples': trial.suggest_int('min_child_samples', 10, 2000), # Higher max prevents overfit with large trees
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 1000.0, log=True), # Higher max increases regularization, helps prevent overfit
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 1000.0, log=True), # Higher max increases regularization, helps prevent overfit
         'min_split_gain': trial.suggest_float('min_split_gain', 0.0, 5.0), 
-        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 1000), # ↑ Min value
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 2000), # Higher max prevents overfit with large trees
         'subsample_for_bin': trial.suggest_int('subsample_for_bin', 20000, 500000),
         'boosting_type': boosting_type,
-        'max_bin': trial.suggest_int('max_bin', 32, 512), # Lower for regularization
+        'max_bin': trial.suggest_int('max_bin', 32, 1024), # Higher max allows finer binning, can help with continuous features
         'objective': 'regression_l1',
-        'n_estimators': 500,
+        'n_estimators': 500, # Consider tuning this if using higher learning_rate
         'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
