@@ -37,13 +37,13 @@ import random
 SEED = random.randint(0, 1000000) # Random seed distributed for each run
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 1.5
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0002
-OBJECTIVE_WEIGHT_REG_REWARD = 0.005
+OBJECTIVE_WEIGHT_GAP_PENALTY = 1
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0001
+OBJECTIVE_WEIGHT_REG_REWARD = 0.0025
 N_ENSEMBLE_MODELS = 5
-OVERFIT_ROUNDS = 16 # Overfitting detection rounds
+OVERFIT_ROUNDS = 17 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
+N_WARMUP_STEPS = 200 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
 # OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
@@ -461,7 +461,7 @@ FROZEN_FEATURES_FOR_INTERACTIONS = [
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
 MAX_INTERACTION_ORDER = 3 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
-MAX_INTERACTIONS_PER_ORDER = {2: 3, 3: 2, 4: 0, 5: 0}
+MAX_INTERACTIONS_PER_ORDER = {2: 8, 3: 4, 4: 1, 5: 0}
 ALL_COMBOS_STR = {}
 
 for order in range(2, MAX_INTERACTION_ORDER + 1):
