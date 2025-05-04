@@ -33,21 +33,21 @@ TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 SEED = 42
-LAG_WEEKS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]
+ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.2
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0001
-OBJECTIVE_WEIGHT_REG_REWARD = 0.001
+OBJECTIVE_WEIGHT_GAP_PENALTY = 2.035
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.001
+OBJECTIVE_WEIGHT_REG_REWARD = 0.0125
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
-#OPTUNA_SAMPLER = "Default"
+OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
-OPTUNA_SAMPLER = "NSGAIIISampler"
-PRUNING_ENABLED = False # Enable Optuna pruning
+# OPTUNA_SAMPLER = "NSGAIIISampler"
+PRUNING_ENABLED = True # Enable Optuna pruning
+# PRUNING_ENABLED = False
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
@@ -100,13 +100,12 @@ def create_temporal_features(df):
     df_out["month_cos"] = np.cos(2 * pi * df_out["month"] / 12)
     return df_out
 
-def create_lag_rolling_features(df, target_col='num_orders', lag_weeks=LAG_WEEKS, rolling_windows=ROLLING_WINDOWS):
+def create_lag_rolling_features(df, target_col='num_orders', rolling_windows=ROLLING_WINDOWS):
     df_out = df.copy()
     group = df_out.groupby(GROUP_COLS, observed=False)
-    for lag in lag_weeks:
-        df_out[f"{target_col}_lag_{lag}"] = group[target_col].shift(lag)
     shifted = group[target_col].shift(1)
     for window in rolling_windows:
+        df_out[f"{target_col}_lag_{window}"] = group[target_col].shift(window)
         df_out[f"{target_col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
         df_out[f"{target_col}_rolling_std_{window}"] = shifted.rolling(window, min_periods=1).std().reset_index(drop=True)
     return df_out
@@ -142,7 +141,7 @@ def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_tra
     df['mean_orders_by_month'] = df['month'].map(month_means)
     return df, weekofyear_means, month_means
 
-def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], windows=LAG_WEEKS):
+def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], windows=ROLLING_WINDOWS):
     df_out = df.copy()
     group = df_out.groupby(GROUP_COLS, observed=False)
     for col in binary_cols:
@@ -158,7 +157,7 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     if is_train or 'num_orders' in df_out.columns:
         df_out = create_lag_rolling_features(df_out)
     df_out = create_other_features(df_out)
-    df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], LAG_WEEKS)
+    df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], ROLLING_WINDOWS)
     df_out = create_group_aggregates(df_out)
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
@@ -228,7 +227,7 @@ for w in [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]:
 
 # Add rolling means for binary features
 for col in ["emailer_for_promotion", "homepage_featured"]:
-    for w in LAG_WEEKS:
+    for w in ROLLING_WINDOWS:
         mean_col = f"{col}_rolling_mean_{w}"
         if mean_col in train_df.columns and mean_col not in features_set:
             FEATURES.append(mean_col)
@@ -364,6 +363,51 @@ final_params = {
     'bagging_freq': 3
 }
 
+class CustomPruningCallback:
+    """
+    Custom Optuna pruning callback for multi-objective studies.
+    Prunes based on the weighted sum of objectives, matching the main Optuna objective calculation.
+    """
+    def __init__(self, trial, metric, valid_name, objective_weights=(1.0, 1.0, 1.0, 1.0)):
+        self._trial = trial
+        self._metric = metric
+        self._valid_name = valid_name
+        self._objective_weights = objective_weights
+
+    def __call__(self, env):
+        # Check if the study is multi-objective
+        if hasattr(self._trial.study, "directions") and len(self._trial.study.directions) > 1:
+            # Find the validation score for the specified metric and valid_name
+            for eval_name, score, is_higher_better, _ in env.evaluation_result_list:
+                if self._valid_name in eval_name and self._metric in eval_name:
+                    # Retrieve all objectives from the trial's user attributes
+                    mean_valid = self._trial.user_attrs.get('mean_valid')
+                    gap_penalty = self._trial.user_attrs.get('gap_penalty')
+                    complexity_penalty = self._trial.user_attrs.get('complexity_penalty')
+                    reg_reward = self._trial.user_attrs.get('reg_reward')
+                    # If any are missing, fallback to score for pruning
+                    if None in (mean_valid, gap_penalty, complexity_penalty, reg_reward):
+                        value = score
+                    else:
+                        w = self._objective_weights
+                        value = (
+                            w[0] * mean_valid +
+                            w[1] * gap_penalty +
+                            w[2] * complexity_penalty +
+                            w[3] * reg_reward
+                        )
+                    self._trial.report(value, step=env.iteration)
+                    if self._trial.should_prune():
+                        raise optuna.TrialPruned()
+        else:
+            # Single-objective fallback: prune on metric
+            for eval_name, score, is_higher_better, _ in env.evaluation_result_list:
+                if self._valid_name in eval_name and self._metric in eval_name:
+                    self._trial.report(score, step=env.iteration)
+                    if self._trial.should_prune():
+                        raise optuna.TrialPruned()
+
+
 class RollingGroupTimeSeriesSplit:
     """
     Rolling window cross-validator for time series data with group awareness.
@@ -412,7 +456,7 @@ FROZEN_FEATURES_FOR_INTERACTIONS = [
     'mean_orders_by_weekofyear', 'mean_orders_by_month'
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
-MAX_INTERACTION_ORDER = 2 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
+MAX_INTERACTION_ORDER = 3 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
 MAX_INTERACTIONS_PER_ORDER = {2: 3, 3: 2, 4: 0, 5: 0}
 ALL_COMBOS_STR = {}
 
@@ -473,12 +517,10 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
 
-    # --- Robust dynamic feature interaction logic ---
+    # --- Robust dynamic feature interaction logic (DRY, all types) ---
     interaction_features = []
     new_interaction_cols = {}
     used_interactions = set()
-    # Dynamically generate all pairwise and higher-order products from eligible features
-    # (no single features, only interactions)
     eligible = FROZEN_FEATURES_FOR_INTERACTIONS.copy()
     for order in range(2, MAX_INTERACTION_ORDER + 1):
         combos = list(combinations(eligible, order))
@@ -491,13 +533,35 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
                 continue
             used_interactions.add(combo_str)
             combo = combo_str.split("|")
-            new_col = "_prod_".join(combo)
-            if new_col not in train_split_df.columns and new_col not in new_interaction_cols:
+            # Product
+            new_col_prod = '_prod_'.join(combo)
+            if new_col_prod not in train_split_df.columns and new_col_prod not in new_interaction_cols:
                 col_val = train_split_df[combo[0]]
                 for f in combo[1:]:
                     col_val = col_val * train_split_df[f]
-                new_interaction_cols[new_col] = col_val
-            interaction_features.append(new_col)
+                new_interaction_cols[new_col_prod] = col_val
+            interaction_features.append(new_col_prod)
+            # Additive
+            new_col_add = '_add_'.join(combo)
+            if new_col_add not in train_split_df.columns and new_col_add not in new_interaction_cols:
+                col_val = train_split_df[combo[0]]
+                for f in combo[1:]:
+                    col_val = col_val + train_split_df[f]
+                new_interaction_cols[new_col_add] = col_val
+            interaction_features.append(new_col_add)
+            # Ratio (only for pairs)
+            if len(combo) == 2:
+                new_col_div = '_div_'.join(combo)
+                if new_col_div not in train_split_df.columns and new_col_div not in new_interaction_cols:
+                    denominator = train_split_df[combo[1]].replace(0, np.nan)
+                    new_interaction_cols[new_col_div] = train_split_df[combo[0]] / denominator
+                    new_interaction_cols[new_col_div] = new_interaction_cols[new_col_div].replace([np.inf, -np.inf], 0).fillna(0)
+                interaction_features.append(new_col_div)
+                # Polynomial: feature1 * feature2 ** 2
+                new_col_poly2 = f'{combo[0]}_poly2_{combo[1]}'
+                if new_col_poly2 not in train_split_df.columns and new_col_poly2 not in new_interaction_cols:
+                    new_interaction_cols[new_col_poly2] = train_split_df[combo[0]] * (train_split_df[combo[1]] ** 2)
+                interaction_features.append(new_col_poly2)
     if new_interaction_cols:
         train_split_df = pd.concat([train_split_df, pd.DataFrame(new_interaction_cols, index=train_split_df.index)], axis=1)
     selected_features += interaction_features
@@ -512,10 +576,16 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
-    if not PRUNING_ENABLED or OPTUNA_SAMPLER == "NSGAIISampler" or OPTUNA_SAMPLER == "NSGAIIISampler":
+    is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
+    if not PRUNING_ENABLED or OPTUNA_SAMPLER in ["NSGAIISampler", "NSGAIIISampler"]:
         callbacks = [
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
         ]  # No pruning callback
+    elif is_multi_objective:
+        callbacks = [
+            CustomPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
+        ]
     else:
         callbacks = [
             LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
@@ -551,7 +621,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     complexity_penalty = OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * len(selected_features)
     complexity_penalty += OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * params['num_leaves']
     complexity_penalty += OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * (params['max_depth'] if params['max_depth'] > 0 else 0)
-    reg_reward = OBJECTIVE_WEIGHT_REG_REWARD * (params['lambda_l1'] + params['lambda_l2'])
+    # Use log1p to avoid favoring very high lambda values (log-scale regularization)
+    reg_reward = OBJECTIVE_WEIGHT_REG_REWARD * (np.log1p(params['lambda_l1']) + np.log1p(params['lambda_l2']))
 
     # Store metrics for logging in callback
     trial.set_user_attr('mean_train', float(mean_train))
@@ -728,27 +799,38 @@ class TqdmOptunaCallback:
                 n_features_list = n_features_list[-console_width:]
 
             # Min-max scale all objectives
-            gap_penalties_scaled = minmax(gap_penalties)
-            complexity_penalties_scaled = minmax(complexity_penalties)
-            reg_rewards_scaled = minmax(reg_rewards)
-            mean_valids_scaled = minmax(mean_valids)
-            objectives_scaled = minmax(objectives)
+            gap_penalties_scaled = gap_penalties
+            complexity_penalties_scaled = complexity_penalties
+            reg_rewards_scaled = reg_rewards
+            mean_valids_scaled = mean_valids
+            objectives_scaled = objectives
+            # gap_penalties_scaled = minmax(gap_penalties)
+            # complexity_penalties_scaled = minmax(complexity_penalties)
+            # reg_rewards_scaled = minmax(reg_rewards)
+            # mean_valids_scaled = minmax(mean_valids)
+            # objectives_scaled = minmax(objectives)
 
             # Label for mean_valid's value (last trial)
+            gap_penalty_label = f"gap_penalty (last: {gap_penalties[-1]:.4f})" if gap_penalties else "gap_penalty"
+            complexity_penalty_label = f"complexity_penalty (last: {complexity_penalties[-1]:.4f})" if complexity_penalties else "complexity_penalty"
+            reg_reward_label = f"reg_reward (last: {reg_rewards[-1]:.4f})" if reg_rewards else "reg_reward"
             mean_valid_label = f"mean_valid (last: {mean_valids[-1]:.4f})" if mean_valids else "mean_valid"
+            objective_label = f"objective (last: {objectives[-1]:.4f})" if objectives else "objective"
 
-            pltx.plot(trial_nums, gap_penalties_scaled, label='gap_penalty (minmax)', color='cyan+', marker='braille')
-            pltx.plot(trial_nums, complexity_penalties_scaled, label='complexity_penalty (minmax)', color='blue+', marker='braille')
-            pltx.plot(trial_nums, reg_rewards_scaled, label='reg_reward (minmax)', color='magenta+', marker='braille')
-            pltx.plot(trial_nums, mean_valids_scaled, label=mean_valid_label, color='green+', marker='braille')
-            pltx.plot(trial_nums, objectives_scaled, label='objective (minmax)', color='orange+', marker='braille')
+            pltx.plot(trial_nums, complexity_penalties_scaled, label=complexity_penalty_label, color=tuple([255,0,0]), marker='braille')
+            pltx.plot(trial_nums, reg_rewards_scaled, label=reg_reward_label, color=tuple([128,0,255]), marker='braille')
+            pltx.plot(trial_nums, gap_penalties_scaled, label=gap_penalty_label, color=tuple([0,255,255]), marker='braille')
+            pltx.plot(trial_nums, mean_valids_scaled, label=mean_valid_label, color=tuple([0,255,0]), marker='braille')
+            pltx.plot(trial_nums, objectives_scaled, label=objective_label, color=tuple([255,255,0]), marker='braille')
 
             pltx.title('Optuna Objectives (Live)')
             pltx.xlabel('Trial')
-            pltx.ylabel('Minmax Scaled Value')
-            pltx.canvas_color('black')
-            pltx.axes_color('black')
+            pltx.ylabel('Value')
+
+            pltx.canvas_color(tuple([0, 0, 0]))
+            pltx.axes_color(tuple([0, 0, 0]))
             pltx.ticks_color('grey')
+            
             pltx.grid(True)
 
             if (top_string):
@@ -781,7 +863,15 @@ elif OPTUNA_SAMPLER == "NSGAIIISampler":
         crossover_prob=0.9,
         swapping_prob=0.5,
     )
-    pruner = optuna.pruners.NopPruner()
+    if PRUNING_ENABLED:
+        pruner = optuna.pruners.HyperbandPruner(
+            min_resource=1,           # Minimum number of iterations/training steps before pruning
+            max_resource=300,         # Maximum number of iterations (matches early stopping rounds)
+            reduction_factor=3,       # How aggressively to halve trials (3 is a good default)
+            bootstrap_count=0         # No bootstrapping, start pruning immediately
+        )
+    else:
+        pruner = optuna.pruners.NopPruner() # No pruning
     directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
 else:
     sampler = optuna.samplers.TPESampler(
@@ -789,11 +879,17 @@ else:
     )
     # For single-objective, you can use any of the objectives, e.g. mean_valid
     if PRUNING_ENABLED:
-        pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=5,
-            n_warmup_steps=N_WARMUP_STEPS,
-            n_min_trials=5,
-            interval_steps=1,
+        # pruner = optuna.pruners.MedianPruner(
+        #     n_startup_trials=5,
+        #     n_warmup_steps=N_WARMUP_STEPS,
+        #     n_min_trials=5,
+        #     interval_steps=1,
+        # )
+        pruner = optuna.pruners.HyperbandPruner(
+            min_resource=1,           # Minimum number of iterations/training steps before pruning
+            max_resource=300,         # Maximum number of iterations (matches early stopping rounds)
+            reduction_factor=3,       # How aggressively to halve trials (3 is a good default)
+            bootstrap_count=0         # No bootstrapping, start pruning immediately
         )
     else:
         pruner = optuna.pruners.NopPruner() # No pruning
@@ -900,10 +996,20 @@ else:
     interaction_features = []
     for k, v in best_trial.params.items():
         if k.startswith('inter_') and v is not None:
-            # v is the combo string, e.g. 'discount_pct|price_diff|meal_orders_mean'
             combo = v.split('|')
-            new_col = '_prod_'.join(combo)
-            interaction_features.append(new_col)
+            # Product
+            new_col_prod = '_prod_'.join(combo)
+            interaction_features.append(new_col_prod)
+            # Additive
+            new_col_add = '_add_'.join(combo)
+            interaction_features.append(new_col_add)
+            # Ratio (only for pairs)
+            if len(combo) == 2:
+                new_col_div = '_div_'.join(combo)
+                interaction_features.append(new_col_div)
+                # Polynomial: feature1 * feature2 ** 2
+                new_col_poly2 = f'{combo[0]}_poly2_{combo[1]}'
+                interaction_features.append(new_col_poly2)
     # Add only unique and not already present
     for f in interaction_features:
         if f not in SELECTED_FEATURES:
@@ -933,16 +1039,41 @@ else:
 # --- Ensure all dynamic interaction features exist in train/valid/test DataFrames ---
 def ensure_interaction_features(df, feature_names):
     for f in feature_names:
+        # Product interactions
         if '_prod_' in f and f not in df.columns:
             parts = f.split('_prod_')
-            # Defensive: only create if all base features exist
             if all(p in df.columns for p in parts):
                 col_val = df[parts[0]]
                 for p in parts[1:]:
                     col_val = col_val * df[p]
                 df[f] = col_val
             else:
-                # If any part is missing, fill with zeros (fail-safe)
+                df[f] = 0
+        # Additive interactions
+        elif '_add_' in f and f not in df.columns:
+            parts = f.split('_add_')
+            if all(p in df.columns for p in parts):
+                col_val = df[parts[0]]
+                for p in parts[1:]:
+                    col_val = col_val + df[p]
+                df[f] = col_val
+            else:
+                df[f] = 0
+        # Ratio interactions
+        elif '_div_' in f and f not in df.columns:
+            parts = f.split('_div_')
+            if len(parts) == 2 and all(p in df.columns for p in parts):
+                denominator = df[parts[1]].replace(0, np.nan)
+                df[f] = df[parts[0]] / denominator
+                df[f] = df[f].replace([np.inf, -np.inf], 0).fillna(0)
+            else:
+                df[f] = 0
+        # Polynomial interactions: feature1 * feature2 ** 2
+        elif '_poly2_' in f and f not in df.columns:
+            parts = f.split('_poly2_')
+            if len(parts) == 2 and all(p in df.columns for p in parts):
+                df[f] = df[parts[0]] * (df[parts[1]] ** 2)
+            else:
                 df[f] = 0
     return df
 
