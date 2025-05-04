@@ -460,7 +460,7 @@ FROZEN_FEATURES_FOR_INTERACTIONS = [
     'mean_orders_by_weekofyear', 'mean_orders_by_month'
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
-MAX_INTERACTION_ORDER = 3 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
+MAX_INTERACTION_ORDER = 4 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
 MAX_INTERACTIONS_PER_ORDER = {2: 8, 3: 4, 4: 1, 5: 0}
 ALL_COMBOS_STR = {}
 
