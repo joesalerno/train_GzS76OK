@@ -37,9 +37,9 @@ import random
 SEED = random.randint(0, 1000000) # Random seed distributed for each run
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.5
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0.05
 OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.00005
-OBJECTIVE_WEIGHT_REG_REWARD = 0.0015
+OBJECTIVE_WEIGHT_REG_REWARD = 0.001
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 17 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
@@ -786,6 +786,38 @@ class TqdmOptunaCallback:
             mn, mx = min(lst), max(lst)
             return [(x - mn) / (mx - mn) for x in lst]
 
+        # Compute best value so far (across all trials, including parallel/remote)
+        best_value_str = "N/A"
+        best_objective_str = "N/A"
+        if self.study is not None:
+            try:
+                # For multi-objective, show best value for the first objective (mean_valid) and best objective (weighted sum)
+                is_multi_objective = hasattr(self.study, 'directions') and len(getattr(self.study, 'directions', [])) > 1
+                all_trials = self.study.get_trials(deepcopy=False)
+                if is_multi_objective:
+                    # Only consider trials with valid values
+                    valid_trials = [t for t in all_trials if t.values is not None and not any(pd.isnull(v) or np.isinf(v) for v in t.values)]
+                    if valid_trials:
+                        best_value = min(t.values[0] for t in valid_trials)
+                        best_value_str = f"{best_value:.5f}"
+                    # Best objective (from user_attrs['objective'])
+                    valid_obj_trials = [t for t in all_trials if hasattr(t, 'user_attrs') and 'objective' in t.user_attrs and t.user_attrs['objective'] is not None and not (pd.isnull(t.user_attrs['objective']) or np.isinf(t.user_attrs['objective']))]
+                    if valid_obj_trials:
+                        best_objective = min(t.user_attrs['objective'] for t in valid_obj_trials)
+                        best_objective_str = f"{best_objective:.5f}"
+                else:
+                    valid_trials = [t for t in all_trials if t.value is not None and not (pd.isnull(t.value) or np.isinf(t.value))]
+                    if valid_trials:
+                        best_value = min(t.value for t in valid_trials)
+                        best_value_str = f"{best_value:.5f}"
+                    # Best objective (from user_attrs['objective'])
+                    valid_obj_trials = [t for t in all_trials if hasattr(t, 'user_attrs') and 'objective' in t.user_attrs and t.user_attrs['objective'] is not None and not (pd.isnull(t.user_attrs['objective']) or np.isinf(t.user_attrs['objective']))]
+                    if valid_obj_trials:
+                        best_objective = min(t.user_attrs['objective'] for t in valid_obj_trials)
+                        best_objective_str = f"{best_objective:.5f}"
+            except Exception:
+                pass
+
         # Limit to most recent trials based on console width (at most 1 trial per character)
         if trial_nums:
             try:
@@ -828,7 +860,7 @@ class TqdmOptunaCallback:
             pltx.plot(trial_nums, mean_valids_scaled, label=mean_valid_label, color=tuple([0,255,0]), marker='braille')
             pltx.plot(trial_nums, objectives_scaled, label=objective_label, color=tuple([255,255,0]), marker='braille')
 
-            pltx.title('Optuna Objectives (Live)')
+            pltx.title(f'Optuna Objectives (Live) | Best validation: {best_value_str} | Best objective: {best_objective_str}')
             pltx.xlabel('Trial')
             pltx.ylabel('Value')
 
