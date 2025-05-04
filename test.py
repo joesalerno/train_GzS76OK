@@ -43,15 +43,17 @@ OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
-# OPTUNA_SAMPLER = "Default"
+OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
-OPTUNA_SAMPLER = "NSGAIIISampler"
+# OPTUNA_SAMPLER = "NSGAIIISampler"
 PRUNING_ENABLED = True # Enable Optuna pruning
 # PRUNING_ENABLED = False
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
-OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
+# OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
+OPTUNA_DB = "postgresql://neondb_owner:npg_oYN4TG5LtRae@ep-ancient-snow-a4gt0d3u-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
+
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
 N_SHAP_SAMPLES = 2000
