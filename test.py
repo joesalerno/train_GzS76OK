@@ -449,25 +449,7 @@ class RollingGroupTimeSeriesSplit:
             val_indices = np.where(val_mask & pd.notnull(groups))[0]
             yield train_indices, val_indices
 
-
 # --- Feature Selection and Hyperparameter Tuning with Optuna ---
-
-# --- Optuna study creation: handle single/multi-objective directions ---
-import optuna
-if OPTUNA_MULTI_OBJECTIVE:
-    study = optuna.create_study(
-        study_name=OPTUNA_STUDY_NAME,
-        directions=['minimize', 'minimize', 'minimize', 'minimize'],
-        storage=OPTUNA_DB,
-        load_if_exists=True
-    )
-else:
-    study = optuna.create_study(
-        study_name=OPTUNA_STUDY_NAME,
-        direction='minimize',
-        storage=OPTUNA_DB,
-        load_if_exists=True
-    )
 
 # --- Precompute eligible features and all possible combos for Optuna feature interactions (module-level, before study) ---
 
@@ -493,8 +475,10 @@ for order, combos in ALL_COMBOS_STR.items():
         assert isinstance(c, str), f"ALL_COMBOS_STR[{order}] contains non-string: {c} ({type(c)})"
 
 def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=train_split_df):
+    print(f"[DEBUG] Starting trial {trial.number}")
     # Hyperparameter search space
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
+    print(f"[DEBUG] boosting_type: {boosting_type}")
     if boosting_type != 'goss':
         bagging_fraction = trial.suggest_float('bagging_fraction', 0.5, 1.0)  # Lower min for more regularization (helps generalization)
         bagging_freq = trial.suggest_int('bagging_freq', 0, 10)
@@ -523,6 +507,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         'verbose': -1,
         'metric': 'rmsle',
     }
+    print(f"[DEBUG] params: {params}")
     # Find all features with sin/cos in their name (excluding those already in a pair)
     sincos_features = [f for f in FEATURES if re.search(r'(_sin|_cos)', f)]
     pair_map = {}
@@ -539,6 +524,10 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             selected_features.extend([sin, cos])
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
+    print(f"[DEBUG] selected_features after sin/cos and base: {selected_features}")
+    print(f"[DEBUG] Starting feature interaction selection...")
+    print(f"[DEBUG] selected_features after interactions: {selected_features}")
+    print(f"[DEBUG] Number of selected features: {len(selected_features)}")
 
     # --- Robust dynamic feature interaction logic (DRY, all types) ---
     interaction_features = []
@@ -599,11 +588,12 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     rgs = RollingGroupTimeSeriesSplit(n_splits=3, train_window=20, val_window=4, week_col='week')
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
+    is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
     if not PRUNING_ENABLED:
         callbacks = [
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
         ]  # No pruning callback
-    elif OPTUNA_MULTI_OBJECTIVE:
+    elif is_multi_objective or OPTUNA_SAMPLER in ["NSGAIISampler", "NSGAIIISampler"]:
         callbacks = [
             CustomPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
@@ -637,6 +627,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     mean_valid = np.mean(valid_scores)
     generalization_gap = mean_valid - mean_train
 
+
+    print(f"[DEBUG] Starting cross-validation loop...")
+    print(f"[DEBUG] mean_train: {mean_train}, mean_valid: {mean_valid}, generalization_gap: {generalization_gap}")
+
+
     # --- Penalty terms as separate objectives ---
     valid_reward = OBJECTIVE_WEIGHT_MEAN_VALID * mean_valid
     gap_penalty = OBJECTIVE_WEIGHT_GAP_PENALTY * max(0, generalization_gap)  # Weight can be tuned. Higher weight = more penalty for overfitting
@@ -656,11 +651,13 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     trial.set_user_attr('reg_reward', float(reg_reward))
     # Store selected features and objective value for callback/plotting
     trial.set_user_attr('n_features', float(len(selected_features)))
-    if (OPTUNA_MULTI_OBJECTIVE):
+    if (is_multi_objective):
         objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
     else:
         objective_val = mean_valid
     trial.set_user_attr('objective', objective_val)
+
+    print(f"[DEBUG] objectives: {[mean_valid, gap_penalty, complexity_penalty, -reg_reward]}")
 
     # Multi-objective: minimize mean_valid, gap_penalty, complexity_penalty, maximize reg_reward (so minimize -reg_reward)
     # If any objective is nan/inf, prune
@@ -669,11 +666,10 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         logging.warning(f"Optuna trial {trial.number} produced invalid objectives: {objectives}.")
         raise optuna.TrialPruned()
 
-    # Configurable: single or multi-objective return
-    if OPTUNA_MULTI_OBJECTIVE:
+    if (is_multi_objective):
         return objectives
     else:
-        return objectives[0]
+        return mean_valid
 
 logging.info("Starting Optuna feature+hyperparam selection...")
 
@@ -909,11 +905,10 @@ if OPTUNA_SAMPLER == "NSGAIISampler":
         swapping_prob=0.5,
     )
     pruner = optuna.pruners.NopPruner()  # Pruning not supported for multi-objective
-    if hasattr(feature_hyperparam_study, "directions") and len(feature_hyperparam_study.directions) > 1:
-        directions = feature_hyperparam_study.directions
-    else:
-        directions = ["minimize"]  # Single-objective
-    directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
+    # if (OPTUNA_MULTI_OBJECTIVE)
+    #     directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
+    # else:
+    #     directions = ["minimize"]  # Single-objective
 elif OPTUNA_SAMPLER == "NSGAIIISampler":
     sampler = optuna.samplers.NSGAIIISampler(
         seed=SEED,
@@ -931,7 +926,7 @@ elif OPTUNA_SAMPLER == "NSGAIIISampler":
         )
     else:
         pruner = optuna.pruners.NopPruner() # No pruning
-    directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
+    # directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
 else:
     sampler = optuna.samplers.TPESampler(
         seed=SEED,
@@ -953,17 +948,29 @@ else:
         )
     else:
         pruner = optuna.pruners.NopPruner() # No pruning
-    directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
+    # directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
     # directions = "minimize"  # Single-objective
 
-feature_hyperparam_study = optuna.create_study(
-    directions=directions,
-    pruner=pruner,
-    study_name=OPTUNA_STUDY_NAME,
-    storage=optuna_storage,
-    load_if_exists=True,
-    sampler=sampler
-)
+if (OPTUNA_MULTI_OBJECTIVE):
+    directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
+    feature_hyperparam_study = optuna.create_study(
+        directions=directions,
+        pruner=pruner,
+        study_name=OPTUNA_STUDY_NAME,
+        storage=optuna_storage,
+        load_if_exists=True,
+        sampler=sampler
+    )
+else:
+    directions = "minimize"
+    feature_hyperparam_study = optuna.create_study(
+        direction=directions,
+        pruner=pruner,
+        study_name=OPTUNA_STUDY_NAME,
+        storage=optuna_storage,
+        load_if_exists=True,
+        sampler=sampler
+    )
 
 # Pass the study to the callback so it can initialize best_value/best_trial
 
