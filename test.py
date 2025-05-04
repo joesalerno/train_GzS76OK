@@ -1020,7 +1020,12 @@ if value_cols:
         print(f"Final best value_0: {feature_hyperparam_study.best_trials[0].values[0]:.5f}")
 else:
     print(df_trials[['number', 'value', 'state']].sort_values('value').head(20))
-    print("Best value among COMPLETE trials:", df_trials[df_trials['state'] == 'COMPLETE']['value'].min())
+    complete_trials = df_trials[df_trials['state'] == 'COMPLETE']
+    if not complete_trials.empty and complete_trials['value'].notnull().any():
+        print("Best value among COMPLETE trials:", complete_trials['value'].min())
+        print(f"Final best value: {complete_trials['value'].min():.5f}")
+    else:
+        print("No COMPLETE trials found. Cannot report best value.")
     print("Best value among ALL trials:", df_trials['value'].min())
     print(f"Final best value: {feature_hyperparam_study.best_value:.5f}")
 
