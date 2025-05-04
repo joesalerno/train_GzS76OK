@@ -52,7 +52,7 @@ OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
 OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-OPTUNA_DB = "postgresql://neondb_owner:npg_SfKxERaWw36V@ep-blue-unit-a4ps2jgn-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
+OPTUNA_DB = "postgresql://neondb_owner:npg_SfKxERaWw36V@ep-delicate-sun-a419i13n-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
 
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
