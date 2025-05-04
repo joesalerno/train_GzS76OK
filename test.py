@@ -43,9 +43,9 @@ OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 150 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
-OPTUNA_SAMPLER = "Default"
+# OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
-# OPTUNA_SAMPLER = "NSGAIIISampler"
+OPTUNA_SAMPLER = "NSGAIIISampler"
 PRUNING_ENABLED = True # Enable Optuna pruning
 # PRUNING_ENABLED = False
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
@@ -416,7 +416,7 @@ class RollingGroupTimeSeriesSplit:
     Groups are respected (e.g., center_id, meal_id).
     No gap is used between train and validation.
     """
-    def __init__(self, n_splits=3, train_window=20, val_window=4, week_col='week'):
+    def __init__(self, n_splits=3, train_window=80, val_window=10, week_col='week'):
         self.n_splits = n_splits
         self.train_window = train_window
         self.val_window = val_window
@@ -577,7 +577,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
     is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
-    if not PRUNING_ENABLED or OPTUNA_SAMPLER in ["NSGAIISampler", "NSGAIIISampler"]:
+    # if not PRUNING_ENABLED or OPTUNA_SAMPLER in ["NSGAIISampler", "NSGAIIISampler"]:
+    if not PRUNING_ENABLED:
         callbacks = [
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
         ]  # No pruning callback
@@ -711,15 +712,15 @@ class TqdmOptunaCallback:
             if x is None:
                 return 'None'
             if isinstance(x, float):
-                return f"{x:.6f}"
+                return f"{x:.5f}"
             return str(x)
 
         sep = "!" if trial.number == self.best_trial_number else ":"
 
         msg = (
-            f"Trial {trial.number} | Best{sep} Trial {self.best_trial_number}: {fmt(self.best_trial_value)} | Objective: {fmt(objective_val)} | Mean Valid: {fmt(mean_valid)} | Gap: {fmt(generalization_gap)} | "
-            f"Features: {n_features} | Num Leaves: {fmt(num_leaves)} | Max Depth: {fmt(max_depth)} | "
-            f"Lambda L1: {fmt(lambda_l1)} | Lambda L2: {fmt(lambda_l2)}"
+            f"Trial {trial.number} | Best Trial{sep} {self.best_trial_number} ({fmt(self.best_trial_value)}) | Objective: {fmt(objective_val)} | Mean Valid: {fmt(mean_valid)} | Gap: {fmt(generalization_gap)} | "
+            f"Features: {int(n_features)} | Num Leaves: {fmt(num_leaves)} | Max Depth: {fmt(max_depth)} | "
+            f"L1: {fmt(lambda_l1)} | L2: {fmt(lambda_l2)}"
         )
         # Color green if this is the best trial so far
         if trial.number == self.best_trial_number:
