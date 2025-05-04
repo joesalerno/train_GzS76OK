@@ -32,12 +32,14 @@ DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
-SEED = 42
+# SEED = 42
+import random
+SEED = random.randint(0, 1000000) # Random seed distributed for each run
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 2.05
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0005
-OBJECTIVE_WEIGHT_REG_REWARD = 0.0125
+OBJECTIVE_WEIGHT_GAP_PENALTY = 1.5
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0002
+OBJECTIVE_WEIGHT_REG_REWARD = 0.005
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 16 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
@@ -893,6 +895,7 @@ else:
             max_resource=300,         # Maximum number of iterations (matches early stopping rounds)
             reduction_factor=3,       # How aggressively to halve trials (3 is a good default)
             bootstrap_count=0         # No bootstrapping, start pruning immediately
+            
         )
     else:
         pruner = optuna.pruners.NopPruner() # No pruning
