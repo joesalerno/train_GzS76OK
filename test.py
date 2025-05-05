@@ -32,28 +32,35 @@ CENTER_INFO_PATH = "fulfilment_center_info.csv"
 # SEED = 42
 import random
 SEED = random.randint(0, 1000000) # Random seed distributed for each run
+MAX_INTERACTION_ORDER = 4 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
+MAX_INTERACTIONS_PER_ORDER = {2: 8, 3: 4, 4: 1, 5: 0}
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
-OPTUNA_MULTI_OBJECTIVE = False  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
-OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.05
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.00005
-OBJECTIVE_WEIGHT_REG_REWARD = 0.001
+
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 17 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 200 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
-OPTUNA_SAMPLER = "Default"
+# OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
-# OPTUNA_SAMPLER = "NSGAIIISampler"
+OPTUNA_SAMPLER = "NSGAIIISampler"
 # PRUNING_ENABLED = True # Enable Optuna pruning
 PRUNING_ENABLED = False
-OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
+OPTUNA_TRIALS = 1 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
-OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
+# OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
+OPTUNA_STUDY_NAME = "multi_objective_lgbm_tuning"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 # OPTUNA_DB = "postgresql://neondb_owner:npg_b9Jo7RhUgpSd@ep-proud-dust-a4fztafy-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
 OPTUNA_DB = "postgresql://postgres:optuna@34.55.13.135:5432/optuna"
+TOP_N_RERUN = 5  # You can make this configurable
+RERUN_TOP_N = True  # Set to False to disable rerun
+RERUN_OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
+OPTUNA_MULTI_OBJECTIVE = True  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
+OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0.05
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.00005
+OBJECTIVE_WEIGHT_REG_REWARD = 0.001
 
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
@@ -460,8 +467,7 @@ FROZEN_FEATURES_FOR_INTERACTIONS = [
     'mean_orders_by_weekofyear', 'mean_orders_by_month'
     # Add more features as needed, but do not change this list between runs of the same study!
 ]
-MAX_INTERACTION_ORDER = 4 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
-MAX_INTERACTIONS_PER_ORDER = {2: 8, 3: 4, 4: 1, 5: 0}
+
 ALL_COMBOS_STR = {}
 
 for order in range(2, MAX_INTERACTION_ORDER + 1):
@@ -981,11 +987,98 @@ else:
         sampler=sampler
     )
 
+
 # Pass the study to the callback so it can initialize best_value/best_trial
-
-print (f"Optuna study name: {OPTUNA_STUDY_NAME}")
-
+print(f"Optuna study name: {OPTUNA_STUDY_NAME}")
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
+
+# --- Rerun the objective for the top N trials from previous study (for multi-objective seeding) ---
+
+# --- Utility: Load Top N Trials from a Different Study Name and Rerun in Current Study ---
+# def rerun_top_n_trials_from_study(source_study_name, n, target_study, train_split_df, storage=OPTUNA_DB):
+#     """
+#     Load the top N trials from a different Optuna study (by name) and rerun them in the current study.
+#     """
+#     import optuna
+#     print(f"Loading top {n} trials from study '{source_study_name}' to rerun in current study '{target_study.study_name}'...")
+#     try:
+#         source_study = optuna.load_study(study_name=source_study_name, storage=storage)
+#     except Exception as e:
+#         print(f"Could not load source study '{source_study_name}': {e}")
+#         return
+#     is_multi_objective = isinstance(source_study.directions, list) and len(source_study.directions) > 1
+#     trials_with_value = [
+#         t for t in source_study.get_trials(deepcopy=False)
+#         if (
+#             (t.values is not None and not any(pd.isnull(v) or np.isinf(v) for v in t.values)) if is_multi_objective
+#             else (t.value is not None and not (pd.isnull(t.value) or np.isinf(t.value)))
+#         )
+#     ]
+#     if not trials_with_value:
+#         print(f"No valid trials found in source study '{source_study_name}'.")
+#         return
+#     if is_multi_objective:
+#         sorted_trials = sorted(trials_with_value, key=lambda t: t.values[0])
+#     else:
+#         sorted_trials = sorted(trials_with_value, key=lambda t: t.value)
+#     for i, trial in enumerate(sorted_trials[:n]):
+#         print(f"Rerunning trial {i} (original trial #{trial.number}) from study '{source_study_name}'...")
+#         rerun_trial_objective_from_params(trial.params, target_study, train_split_df)
+
+
+
+
+
+def rerun_trial_objective_from_params(params, study, train_split_df):
+    """
+    Rerun the objective with fixed params/features from a previous trial.
+    This will create a new trial in the current study with the same params/features.
+    """
+    def fixed_objective(trial):
+        # Set all params as fixed
+        for k, v in params.items():
+            if isinstance(v, bool):
+                trial.suggest_categorical(k, [v])
+            elif isinstance(v, int):
+                trial.suggest_int(k, v, v)
+            elif isinstance(v, float):
+                trial.suggest_float(k, v, v)
+            else:
+                trial.suggest_categorical(k, [v])
+        return optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=train_split_df)
+    # Run a single trial with fixed params
+    study.optimize(fixed_objective, n_trials=1)
+
+# Only rerun if enabled and there are previous trials
+if RERUN_TOP_N:
+    # Load previous study (single-objective or multi-objective)
+    try:
+        prev_study = optuna.load_study(study_name=RERUN_OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
+        print(f"Loaded previous study for rerun seeding: {RERUN_OPTUNA_STUDY_NAME}")
+        # Use the same weighted objective as before
+        is_multi_objective = isinstance(prev_study.directions, list) and len(prev_study.directions) > 1
+        trials_with_value = [
+            t for t in prev_study.get_trials(deepcopy=False)
+            if (
+                (t.values is not None and not any(pd.isnull(v) or np.isinf(v) for v in t.values)) if is_multi_objective
+                else (t.value is not None and not (pd.isnull(t.value) or np.isinf(t.value)))
+            )
+        ]
+        if trials_with_value:
+            # For multi-objective, use the first objective (already weighted) for sorting
+            if is_multi_objective:
+                sorted_trials = sorted(trials_with_value, key=lambda t: t.values[0])
+            else:
+                sorted_trials = sorted(trials_with_value, key=lambda t: t.value)
+            for i, trial in enumerate(sorted_trials[:TOP_N_RERUN]):
+                print(f"Rerunning top trial {i} (original trial #{trial.number}) for multi-objective seeding...")
+                rerun_trial_objective_from_params(trial.params, feature_hyperparam_study, train_split_df)
+        else:
+            print("No valid previous trials found for rerun seeding.")
+    except Exception as e:
+        print(f"Could not load previous study for rerun seeding: {e}")
+
+# Now run the main optimization as usual
 try:
     feature_hyperparam_study.optimize(
         partial(optuna_feature_selection_and_hyperparam_objective, train_split_df=train_split_df),
@@ -1040,21 +1133,6 @@ else:
 # --- Patch: Always use the best trial by value, regardless of state (COMPLETE or PRUNED) ---
 is_multi_objective = isinstance(feature_hyperparam_study.directions, list) and len(feature_hyperparam_study.directions) > 1
 
-# Use a weighted sum of all objectives for best trial selection (adjust weights as needed)
-# These weights should match the intent of your objective function.
-# For example, if you want to penalize overfitting more, increase the weight for gap_penalty, etc.
-# Already set and weighted in the objective function
-objective_weights = [1.0, 1.0, 1.0, 1.0]  # [mean_valid, gap_penalty, complexity_penalty, -reg_reward]
-def get_weighted_objective(trial):
-    if is_multi_objective and trial.values is not None:
-        # Defensive: Only use as many weights as there are objectives
-        n_obj = min(len(objective_weights), len(trial.values))
-        return sum(objective_weights[i] * trial.values[i] for i in range(n_obj))
-    elif not is_multi_objective and trial.value is not None:
-        return trial.value
-    else:
-        return float('inf')  # Exclude invalid trials
-
 trials_with_value = [
     t for t in feature_hyperparam_study.get_trials(deepcopy=False)
     if (
@@ -1068,9 +1146,14 @@ if not trials_with_value:
     SELECTED_FEATURES = FEATURES.copy()
     best_params = final_params.copy()
 else:
-    best_trial = min(trials_with_value, key=get_weighted_objective)
-    best_value = get_weighted_objective(best_trial)
-    print(f"Best trial number: {best_trial.number}, weighted value: {best_value}, state: {best_trial.state}")
+    # For multi-objective, use the first objective (already weighted) for sorting
+    if is_multi_objective:
+        best_trial = min(trials_with_value, key=lambda t: t.values[0])
+        best_value = best_trial.values[0]
+    else:
+        best_trial = min(trials_with_value, key=lambda t: t.value)
+        best_value = best_trial.value
+    print(f"Best trial number: {best_trial.number}, value: {best_value}, state: {best_trial.state}")
     best_mask = [best_trial.params.get(f, False) for f in FEATURES]
     SELECTED_FEATURES = [f for f, keep in zip(FEATURES, best_mask) if keep]
     # --- Add selected interaction features from best_trial ---
