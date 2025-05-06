@@ -683,7 +683,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
     is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
-    if not PRUNING_ENABLED:
+    if not PRUNING_ENABLED == True:
         callbacks = [
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
         ]
@@ -715,7 +715,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             seed=SEED + trial.number,
             group_cols=GROUP_COLS
         )
-        model = LGBMRegressor(**params)
+        model = LGBMRegressor(**params, SEED=SEED + trial.number)
         # Train with only callbacks for early stopping/pruning
         model.fit(
             X_train, y_train,
@@ -1412,16 +1412,13 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
             group_cols=GROUP_COLS
         )
         model = LGBMRegressor(**params, seed=SEED+i)
-        if eval_metric:
-            model.fit(
-                X_train, y_train,
-                eval_set=[(X_train, y_train), (valid_df[FEATURES], valid_df[TARGET])],
-                eval_metric=eval_metric,
-                callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)],
-                categorical_feature=CATEGORICAL_FEATURES
-            )
-        else:
-            model.fit(X_train, y_train, categorical_feature=CATEGORICAL_FEATURES)
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_train, y_train), (valid_df[FEATURES], valid_df[TARGET])],
+            eval_metric=eval_metric,
+            callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)],
+            categorical_feature=CATEGORICAL_FEATURES
+        )
         preds_list.append(recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values)
         models.append(model)
     return np.mean(preds_list, axis=0).round().astype(int), models
