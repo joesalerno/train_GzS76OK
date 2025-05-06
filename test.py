@@ -545,8 +545,6 @@ def add_training_noise(df, features, target,
         X = X.loc[idx].reset_index(drop=True)
         y = y.loc[idx].reset_index(drop=True)
     return X, y
-
-
 def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=train_split_df):
     # Hyperparameter search space
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
@@ -556,7 +554,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     else:
         bagging_fraction = 1.0
         bagging_freq = 0
-    # --- Hyperparameters: learning, model params and noise settings ---
     params = {
         'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.5, log=True), # Higher max allows faster learning, but can overfit if too high
         'num_leaves': trial.suggest_int('num_leaves', 4, 512), # Higher max allows more complex trees, but can overfit
@@ -690,20 +687,21 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             seed=SEED + trial.number,
             group_cols=GROUP_COLS
         )
-        # Validation data remains unchanged
-        X_valid = train_split_df.iloc[valid_idx][selected_features]
-        y_valid = train_split_df.iloc[valid_idx][TARGET]
         model = LGBMRegressor(**params)
         model.fit(
-            X_train, y_train,
-            eval_set=[ (X_train, y_train), (X_valid, y_valid) ],
+            X_train,
+            y_train,
+            eval_set=[
+                (X_train, y_train),
+                (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
+            ],
             eval_metric=rmsle_lgbm,
             callbacks=callbacks,
             categorical_feature=categorical_feature,
         )
         y_train_pred = model.predict(X_train)
-        y_valid_pred = model.predict(X_valid)
-        train_score = rmsle(train_split_df.iloc[train_idx][TARGET], y_train_pred)
+        y_valid_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
+        train_score = rmsle(y_train, y_train_pred)
         valid_score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_valid_pred)
         train_scores.append(train_score)
         valid_scores.append(valid_score)
@@ -1303,7 +1301,7 @@ def ensure_interaction_features(df, feature_names):
             else:
                 df[f] = 0
     return df
-    
+
 # Apply to all relevant DataFrames
 train_df = ensure_interaction_features(train_df, SELECTED_FEATURES)
 valid_df = ensure_interaction_features(valid_df, SELECTED_FEATURES)
@@ -1352,10 +1350,7 @@ def recursive_predict(model, train_df, predict_df, FEATURES, weekofyear_means=No
     final_predictions['id'] = final_predictions['id'].astype(int)
     return final_predictions.set_index('id')['num_orders']
 
-def recursive_ensemble(train_df, test_df, FEATURES,
-                       weekofyear_means=None, month_means=None,
-                       n_models=N_ENSEMBLE_MODELS, eval_metric=None,
-                       noise_target_level=0.0, noise_feature_level=0.0, bootstrap_frac=0.0):
+def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=N_ENSEMBLE_MODELS, eval_metric=None):
     preds_list = []
     models = []
     for i in tqdm(range(n_models), desc="Ensemble Models", position=0):
@@ -1370,7 +1365,7 @@ def recursive_ensemble(train_df, test_df, FEATURES,
             seed=SEED + i,
             group_cols=GROUP_COLS
         )
-        model = LGBMRegressor(**params, seed=SEED + i)
+        model = LGBMRegressor(**params, seed=SEED+i)
         if eval_metric:
             model.fit(
                 X_train, y_train,
