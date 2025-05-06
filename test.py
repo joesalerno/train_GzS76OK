@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 from lightgbm import LGBMRegressor
 import lightgbm as lgb  # Added for early stopping callback
 import optuna
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, GroupKFold
+from sklearn.metrics import mean_squared_log_error, mean_absolute_error, r2_score
 from optuna.integration import LightGBMPruningCallback
 from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
 import shap
@@ -48,11 +51,9 @@ POPULATION_SIZE = 32 # Population size for Genetic algorithm
 # OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
 OPTUNA_SAMPLER = "NSGAIIISampler"
-# PRUNING_ENABLED = True # Enable Optuna pruning
-PRUNING_ENABLED = False
+PRUNING_ENABLED = False # Enable pruning for Optuna trials
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
-
 RERUN_TOP_N = 0 # Number of top trials to rerun for final model training
 RERUN_OPTUNA_STUDY_NAME = "recursive_lgbm_tuning" # Study name for rerun
 
@@ -169,22 +170,15 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     df_out = add_binary_rolling_means(df_out, ["emailer_for_promotion", "homepage_featured"], ROLLING_WINDOWS)
     df_out = create_group_aggregates(df_out)
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
-    
-    # Add indicator columns for missing lag/rolling/stat features (leave NaN as is)
-    # lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
-    #     "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_mean", "_std"
-    # ])]
-
-    # Create indicator columns for lag/rolling/stat features (not NaN)
-    # cols_to_indicator = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
-    # for col in cols_to_indicator:
-    #     indicator_col = f"{col}_notna"
-    #     df_out[indicator_col] = df_out[col].notna().astype(int)
-
-    # Only fill discount_pct (not a rolling feature)
-    # if "discount_pct" in df_out.columns:
-    #     df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
-        
+    # Fill NaNs for all engineered features
+    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
+        "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_mean", "_std"
+    ])]
+    cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
+    if cols_to_fill:
+        df_out.loc[:, cols_to_fill] = df_out[cols_to_fill].fillna(0)
+    if "discount_pct" in df_out.columns:
+        df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
     # Defragment and deduplicate DataFrame ONCE at the end
     df_out = df_out.copy()
     df_out = df_out.loc[:, ~df_out.columns.duplicated()]
@@ -454,6 +448,42 @@ class ExpandingGroupTimeSeriesSplit:
             val_indices = np.where(val_mask & pd.notnull(groups))[0]
             yield train_indices, val_indices
 
+class RollingGroupTimeSeriesSplit:
+    """
+    Rolling window cross-validator for time series data with group awareness.
+    For each split, the training set is a rolling window of train_window unique weeks,
+    and the validation set is the next val_window unique weeks.
+    Groups are respected (e.g., center_id, meal_id).
+    No gap is used between train and validation.
+    """
+    def __init__(self, n_splits=3, train_window=80, val_window=10, week_col='week'):
+        self.n_splits = n_splits
+        self.train_window = train_window
+        self.val_window = val_window
+        self.week_col = week_col
+
+    def split(self, X, y=None, groups=None):
+        if groups is None:
+            raise ValueError("Group labels must be provided for RollingGroupTimeSeriesSplit.")
+        weeks = np.sort(X[self.week_col].unique())
+        total_weeks = len(weeks)
+        max_start = total_weeks - self.train_window - self.val_window + 1
+        if self.n_splits > max_start:
+            raise ValueError(f"Not enough weeks for {self.n_splits} splits with train_window={self.train_window} and val_window={self.val_window}.")
+        for i in range(self.n_splits):
+            train_start = i * (max_start // self.n_splits)
+            train_end = train_start + self.train_window
+            val_start = train_end
+            val_end = val_start + self.val_window
+            train_weeks = weeks[train_start:train_end]
+            val_weeks = weeks[val_start:val_end]
+            train_mask = X[self.week_col].isin(train_weeks)
+            val_mask = X[self.week_col].isin(val_weeks)
+            # Respect groups: only include indices where group is not missing
+            train_indices = np.where(train_mask & pd.notnull(groups))[0]
+            val_indices = np.where(val_mask & pd.notnull(groups))[0]
+            yield train_indices, val_indices
+
 # --- Feature Selection and Hyperparameter Tuning with Optuna ---
 
 # --- Precompute eligible features and all possible combos for Optuna feature interactions (module-level, before study) ---
@@ -502,7 +532,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         'boosting_type': boosting_type,
         'max_bin': trial.suggest_int('max_bin', 32, 1024), # Higher max allows finer binning, can help with continuous features
         'objective': 'regression_l1',
-        'n_estimators': 3000, # Consider tuning this if using higher learning_rate
+        'n_estimators': 5, # Consider tuning this if using higher learning_rate
         'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
@@ -525,7 +555,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             selected_features.extend([sin, cos])
     # Only tune non-sin/cos features individually
     selected_features += [f for f in FEATURES if (f not in sincos_features) and trial.suggest_categorical(f, [True, False])]
-
+    
     # --- Robust dynamic feature interaction logic (DRY, all types) ---
     interaction_features = []
     new_interaction_cols = {}
@@ -581,86 +611,85 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         logging.warning(f"Optuna selected {len(selected_features)} features, which is less than 10. This may lead to overfitting.")
         raise optuna.TrialPruned()
 
-    # Use expanding window group time series split
+    # Use rolling window group time series split
     rgs = ExpandingGroupTimeSeriesSplit(n_splits=5, min_train_window=30, val_window=10, week_col='week')
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
     is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
     if not PRUNING_ENABLED:
-        callbacks = [early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)]
+        callbacks = [
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
+        ]
     elif is_multi_objective or OPTUNA_SAMPLER in ["NSGAIISampler", "NSGAIIISampler"]:
-        callbacks = [CustomPruningCallback(trial, metric='rmsle', valid_name='valid_1'), early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)]
+        callbacks = [
+            CustomPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
+        ]
     else:
-        callbacks = [LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'), early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)]
+        callbacks = [
+            LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
+        ]
 
     for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
         model = LGBMRegressor(**params)
-        X_train = train_split_df.iloc[train_idx][selected_features]
-        y_train = train_split_df.iloc[train_idx][TARGET]
-        if is_multi_objective:
-            X_valid = train_split_df.iloc[valid_idx][selected_features]
-            y_valid = train_split_df.iloc[valid_idx][TARGET]
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=[(X_train, y_train), (X_valid, y_valid)],
-                eval_metric=rmsle_lgbm,
-                callbacks=callbacks
-            )
-            y_train_pred = model.predict(X_train)
-            y_valid_pred = model.predict(X_valid)
-            train_score = rmsle(y_train, y_train_pred)
-            valid_score = rmsle(y_valid, y_valid_pred)
-            train_scores.append(train_score)
-            valid_scores.append(valid_score)
-        else:
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=[(X_train, y_train)],
-                eval_metric=rmsle_lgbm,
-                callbacks=callbacks
-            )
-            y_train_pred = model.predict(X_train)
-            train_score = rmsle(y_train, y_train_pred)
-            train_scores.append(train_score)
+        model.fit(
+            train_split_df.iloc[train_idx][selected_features],
+            train_split_df.iloc[train_idx][TARGET],
+            eval_set=[
+                (train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
+                (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
+            ],
+            eval_metric=rmsle_lgbm,
+            callbacks=callbacks
+        )
+        y_train_pred = model.predict(train_split_df.iloc[train_idx][selected_features])
+        y_valid_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
+        train_score = rmsle(train_split_df.iloc[train_idx][TARGET], y_train_pred)
+        valid_score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_valid_pred)
+        train_scores.append(train_score)
+        valid_scores.append(valid_score)
 
     mean_train = np.mean(train_scores)
-    if is_multi_objective:
-        mean_valid = np.mean(valid_scores)
-        generalization_gap = mean_valid - mean_train
-        # --- Penalty terms as separate objectives ---
-        valid_reward = OBJECTIVE_WEIGHT_MEAN_VALID * mean_valid
-        gap_penalty = OBJECTIVE_WEIGHT_GAP_PENALTY * max(0, generalization_gap)
-        complexity_penalty = OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * len(selected_features)
-        complexity_penalty += OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * params['num_leaves']
-        complexity_penalty += OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * (params['max_depth'] if params['max_depth'] > 0 else 0)
-        reg_reward = OBJECTIVE_WEIGHT_REG_REWARD * (np.log1p(params['lambda_l1']) + np.log1p(params['lambda_l2']))
-        # Store metrics for logging in callback
-        trial.set_user_attr('mean_train', float(mean_train))
-        trial.set_user_attr('mean_valid', float(mean_valid))
-        trial.set_user_attr('generalization_gap', float(generalization_gap))
-        trial.set_user_attr('valid_reward', float(valid_reward))
-        trial.set_user_attr('gap_penalty', float(gap_penalty))
-        trial.set_user_attr('complexity_penalty', float(complexity_penalty))
-        trial.set_user_attr('reg_reward', float(reg_reward))
-        trial.set_user_attr('n_features', float(len(selected_features)))
+    mean_valid = np.mean(valid_scores)
+    generalization_gap = mean_valid - mean_train
+
+    # --- Penalty terms as separate objectives ---
+    valid_reward = OBJECTIVE_WEIGHT_MEAN_VALID * mean_valid
+    gap_penalty = OBJECTIVE_WEIGHT_GAP_PENALTY * max(0, generalization_gap)  # Weight can be tuned. Higher weight = more penalty for overfitting
+    complexity_penalty = OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * len(selected_features)
+    complexity_penalty += OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * params['num_leaves']
+    complexity_penalty += OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY * (params['max_depth'] if params['max_depth'] > 0 else 0)
+    # Use log1p to avoid favoring very high lambda values (log-scale regularization)
+    reg_reward = OBJECTIVE_WEIGHT_REG_REWARD * (np.log1p(params['lambda_l1']) + np.log1p(params['lambda_l2']))
+
+    # Store metrics for logging in callback
+    trial.set_user_attr('mean_train', float(mean_train))
+    trial.set_user_attr('mean_valid', float(mean_valid))
+    trial.set_user_attr('generalization_gap', float(generalization_gap))
+    trial.set_user_attr('valid_reward', float(valid_reward))
+    trial.set_user_attr('gap_penalty', float(gap_penalty))
+    trial.set_user_attr('complexity_penalty', float(complexity_penalty))
+    trial.set_user_attr('reg_reward', float(reg_reward))
+    # Store selected features and objective value for callback/plotting
+    trial.set_user_attr('n_features', float(len(selected_features)))
+    if (is_multi_objective):
         objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
-        objectives = [mean_valid, gap_penalty, complexity_penalty, -reg_reward]
-        if any(np.isnan(obj) or np.isinf(obj) for obj in objectives):
-            logging.warning(f"Optuna trial {trial.number} produced invalid objectives: {objectives}.")
-            raise optuna.TrialPruned()
-        trial.set_user_attr('objective', objective_val)
+    else:
+        objective_val = mean_valid
+    trial.set_user_attr('objective', objective_val)
+
+    # Multi-objective: minimize mean_valid, gap_penalty, complexity_penalty, maximize reg_reward (so minimize -reg_reward)
+    # If any objective is nan/inf, prune
+    objectives = [mean_valid, gap_penalty, complexity_penalty, -reg_reward]
+    if any(np.isnan(obj) or np.isinf(obj) for obj in objectives):
+        logging.warning(f"Optuna trial {trial.number} produced invalid objectives: {objectives}.")
+        raise optuna.TrialPruned()
+
+    if (is_multi_objective):
         return objectives
     else:
-        # Single-objective: skip validation prediction and gap/penalty calculations for speed
-        trial.set_user_attr('mean_train', float(mean_train))
-        trial.set_user_attr('n_features', float(len(selected_features)))
-        trial.set_user_attr('objective', mean_train)
-        if np.isnan(mean_train) or np.isinf(mean_train):
-            logging.warning(f"Optuna trial {trial.number} produced invalid mean_train: {mean_train}.")
-            raise optuna.TrialPruned()
-        return mean_train
+        return mean_valid
 
 logging.info("Starting Optuna feature+hyperparam selection...")
 
@@ -765,16 +794,7 @@ class TqdmOptunaCallback:
 
 
     def live_plot_objectives(self, trials, top_string):
-
         pltx.clf()
-        # Detect if multi-objective or single-objective
-        is_multi_objective = False
-        if self.study is not None:
-            try:
-                is_multi_objective = hasattr(self.study, 'directions') and len(getattr(self.study, 'directions', [])) > 1
-            except Exception:
-                pass
-
         trial_nums = []
         mean_valids = []
         gap_penalties = []
@@ -782,31 +802,17 @@ class TqdmOptunaCallback:
         reg_rewards = []
         objectives = []
         n_features_list = []
-
-        if is_multi_objective:
-            for t in trials:
-                if t.values is not None and len(t.values) >= 4:
-                    trial_nums.append(t.number)
-                    mean_valids.append(t.values[0])
-                    gap_penalties.append(t.values[1])
-                    complexity_penalties.append(t.values[2])
-                    reg_rewards.append(-t.values[3])  # Negated because you minimize -reg_reward
-                    obj = t.user_attrs.get('objective', None)
-                    objectives.append(obj)
-                    n_features = t.user_attrs.get('n_features', None)
-                    n_features_list.append(n_features)
-        else:
-            # Single-objective: just plot t.value
-            for t in trials:
-                if t.value is not None and not (pd.isnull(t.value) or np.isinf(t.value)):
-                    trial_nums.append(t.number)
-                    mean_valids.append(t.value)
-            # For single-objective, set dummy lists for compatibility
-            gap_penalties = [0] * len(trial_nums)
-            complexity_penalties = [0] * len(trial_nums)
-            reg_rewards = [0] * len(trial_nums)
-            objectives = mean_valids.copy()
-            n_features_list = [None] * len(trial_nums)
+        for t in trials:
+            if t.values is not None and len(t.values) >= 4:
+                trial_nums.append(t.number)
+                mean_valids.append(t.values[0])
+                gap_penalties.append(t.values[1])
+                complexity_penalties.append(t.values[2])
+                reg_rewards.append(-t.values[3])  # Negated because you minimize -reg_reward
+                obj = t.user_attrs.get('objective', None)
+                objectives.append(obj)
+                n_features = t.user_attrs.get('n_features', None)
+                n_features_list.append(n_features)
 
         # Min-max scaling helper
         def minmax(lst):
@@ -847,7 +853,6 @@ class TqdmOptunaCallback:
             except Exception:
                 pass
 
-
         # Limit to most recent trials based on console width (at most 1 trial per character)
         if trial_nums:
             try:
@@ -865,44 +870,39 @@ class TqdmOptunaCallback:
                 objectives = objectives[-console_width:]
                 n_features_list = n_features_list[-console_width:]
 
-            if is_multi_objective:
-                # Min-max scale all objectives
-                gap_penalties_scaled = gap_penalties
-                complexity_penalties_scaled = complexity_penalties
-                reg_rewards_scaled = reg_rewards
-                mean_valids_scaled = mean_valids
-                objectives_scaled = objectives
-                # gap_penalties_scaled = minmax(gap_penalties)
-                # complexity_penalties_scaled = minmax(complexity_penalties)
-                # reg_rewards_scaled = minmax(reg_rewards)
-                # mean_valids_scaled = minmax(mean_valids)
-                # objectives_scaled = minmax(objectives)
+            # Min-max scale all objectives
+            gap_penalties_scaled = gap_penalties
+            complexity_penalties_scaled = complexity_penalties
+            reg_rewards_scaled = reg_rewards
+            mean_valids_scaled = mean_valids
+            objectives_scaled = objectives
+            # gap_penalties_scaled = minmax(gap_penalties)
+            # complexity_penalties_scaled = minmax(complexity_penalties)
+            # reg_rewards_scaled = minmax(reg_rewards)
+            # mean_valids_scaled = minmax(mean_valids)
+            # objectives_scaled = minmax(objectives)
 
-                # Label for mean_valid's value (last trial)
-                gap_penalty_label = f"gap_penalty (last: {gap_penalties[-1]:.4f})" if gap_penalties else "gap_penalty"
-                complexity_penalty_label = f"complexity_penalty (last: {complexity_penalties[-1]:.4f})" if complexity_penalties else "complexity_penalty"
-                reg_reward_label = f"reg_reward (last: {reg_rewards[-1]:.4f})" if reg_rewards else "reg_reward"
-                mean_valid_label = f"mean_valid (last: {mean_valids[-1]:.4f})" if mean_valids else "mean_valid"
-                objective_label = f"objective (last: {objectives[-1]:.4f})" if objectives else "objective"
+            # Label for mean_valid's value (last trial)
+            gap_penalty_label = f"gap_penalty (last: {gap_penalties[-1]:.4f})" if gap_penalties else "gap_penalty"
+            complexity_penalty_label = f"complexity_penalty (last: {complexity_penalties[-1]:.4f})" if complexity_penalties else "complexity_penalty"
+            reg_reward_label = f"reg_reward (last: {reg_rewards[-1]:.4f})" if reg_rewards else "reg_reward"
+            mean_valid_label = f"mean_valid (last: {mean_valids[-1]:.4f})" if mean_valids else "mean_valid"
+            objective_label = f"objective (last: {objectives[-1]:.4f})" if objectives else "objective"
 
-                pltx.plot(trial_nums, complexity_penalties_scaled, label=complexity_penalty_label, color=tuple([255,0,0]), marker='braille')
-                pltx.plot(trial_nums, reg_rewards_scaled, label=reg_reward_label, color=tuple([128,0,255]), marker='braille')
-                pltx.plot(trial_nums, gap_penalties_scaled, label=gap_penalty_label, color=tuple([0,255,255]), marker='braille')
-                pltx.plot(trial_nums, mean_valids_scaled, label=mean_valid_label, color=tuple([0,255,0]), marker='braille')
-                pltx.plot(trial_nums, objectives_scaled, label=objective_label, color=tuple([255,255,0]), marker='braille')
-                pltx.title(f'Optuna Objectives (Live) | Best validation: {best_value_str} | Best objective: {best_objective_str}')
-            else:
-                # Single-objective: just plot mean_valids
-                mean_valid_label = f"objective (last: {mean_valids[-1]:.4f})" if mean_valids else "objective"
-                pltx.plot(trial_nums, mean_valids, label=mean_valid_label, color=tuple([0,255,0]), marker='braille')
-                pltx.title(f'Optuna Objective (Live) | Best value: {best_value_str}')
+            pltx.plot(trial_nums, complexity_penalties_scaled, label=complexity_penalty_label, color=tuple([255,0,0]), marker='braille')
+            pltx.plot(trial_nums, reg_rewards_scaled, label=reg_reward_label, color=tuple([128,0,255]), marker='braille')
+            pltx.plot(trial_nums, gap_penalties_scaled, label=gap_penalty_label, color=tuple([0,255,255]), marker='braille')
+            pltx.plot(trial_nums, mean_valids_scaled, label=mean_valid_label, color=tuple([0,255,0]), marker='braille')
+            pltx.plot(trial_nums, objectives_scaled, label=objective_label, color=tuple([255,255,0]), marker='braille')
 
+            pltx.title(f'Optuna Objectives (Live) | Best validation: {best_value_str} | Best objective: {best_objective_str}')
             pltx.xlabel('Trial')
             pltx.ylabel('Value')
 
             pltx.canvas_color(tuple([0, 0, 0]))
             pltx.axes_color(tuple([0, 0, 0]))
             pltx.ticks_color('grey')
+            
             pltx.grid(True)
 
             if (top_string):
@@ -915,7 +915,6 @@ class TqdmOptunaCallback:
 
 # Create the study 
 optuna_storage = OPTUNA_DB
-
 if OPTUNA_SAMPLER == "NSGAIISampler":
     sampler = optuna.samplers.NSGAIISampler(
         seed=SEED,
@@ -954,13 +953,6 @@ else:
             n_min_trials=5,
             interval_steps=1,
         )
-        # pruner = optuna.pruners.HyperbandPruner(
-        #     min_resource=1,           # Minimum number of iterations/training steps before pruning
-        #     max_resource=300,         # Maximum number of iterations (matches early stopping rounds)
-        #     reduction_factor=3,       # How aggressively to halve trials (3 is a good default)
-        #     bootstrap_count=0         # No bootstrapping, start pruning immediately
-            
-        # )
     else:
         pruner = optuna.pruners.NopPruner() # No pruning
 
@@ -990,89 +982,6 @@ else:
 print (f"Optuna study name: {OPTUNA_STUDY_NAME}")
 
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
-
-
-
-
-
-def rerun_old_trials_in_new_study(old_study, new_study, train_split_df=train_split_df, n_trials=None):
-    """
-    Rerun top N trials from old_study in new_study, skipping any with params not valid in the new search space.
-    """
-
-    # Get completed trials sorted by value (lowest first)
-    completed = [t for t in old_study.trials if t.state == 'COMPLETE']
-    completed = sorted(completed, key=lambda t: t.value if hasattr(t, "value") and t.value is not None else float("inf"))
-    if n_trials is not None:
-        completed = completed[:n_trials]
-
-    # Diagnostic: print ALL_COMBOS_STR for each order
-    print("\n[DIAGNOSTIC] ALL_COMBOS_STR (new search space):")
-    for order, combos in ALL_COMBOS_STR.items():
-        print(f"  Order {order}: {len(combos)} combos")
-        if len(combos) <= 10:
-            print(f"    {combos}")
-        else:
-            print(f"    {combos[:5]} ... {combos[-5:]}")
-
-    for t in completed:
-        params = t.params
-        # Diagnostic: print params for this trial
-        print(f"\n[DIAGNOSTIC] Checking trial {t.number} params:")
-        for k, v in params.items():
-            print(f"  {k}: {v}")
-        # Validate all categorical params are still valid in the new search space
-        valid = True
-        for k, v in params.items():
-            # If this is an interaction param, check if the value is in the new ALL_COMBOS_STR
-            if k.startswith("inter_"):
-                order = int(k.split("_")[1][0])
-                if v not in ALL_COMBOS_STR.get(order, []):
-                    print(f"[DIAGNOSTIC]   -> INVALID: {k} value '{v}' not in ALL_COMBOS_STR[{order}]")
-                    valid = False
-                    break
-        if not valid:
-            print(f"Skipping trial {t.number}: param {k} value {v} not in new search space.")
-            continue
-        # Rerun the trial in the new study
-        def fixed_objective(trial, train_split_df):
-            # Set all params as fixed, but for known categoricals use full search space
-            for k, v in params.items():
-                if k == 'boosting_type':
-                    trial.suggest_categorical(k, ['gbdt', 'dart', 'goss'])
-                # Add other known categoricals here as needed
-                elif isinstance(v, bool):
-                    trial.suggest_categorical(k, [True, False])
-                elif isinstance(v, int):
-                    trial.suggest_int(k, v, v)
-                elif isinstance(v, float):
-                    trial.suggest_float(k, v, v)
-                else:
-                    # For interaction features, use the full set from ALL_COMBOS_STR
-                    if k.startswith("inter_"):
-                        order = int(k.split("_")[1][0])
-                        trial.suggest_categorical(k, ALL_COMBOS_STR.get(order, [v]))
-                    else:
-                        trial.suggest_categorical(k, [v])
-            # Call the main objective (with fixed params)
-            return optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=train_split_df)
-        print(f"Rerunning trial {t.number} in new study...")
-        # new_study.optimize(fixed_objective, n_trials=1, catch=(Exception,))
-        new_study.optimize(
-            partial(fixed_objective, train_split_df=train_split_df),
-            n_trials=1,
-            timeout=OPTUNA_TIMEOUT,
-            callbacks=[optuna_callback],
-            n_jobs=1
-        )
-
-# Load the old study and create a new study with the same name
-if RERUN_TOP_N > 0 and RERUN_OPTUNA_STUDY_NAME:
-    print(f"Rerunning top {RERUN_TOP_N} trials from old study '{RERUN_OPTUNA_STUDY_NAME}'...")
-    old_study = optuna.load_study(study_name=RERUN_OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
-    rerun_old_trials_in_new_study(old_study, feature_hyperparam_study, train_split_df=train_split_df, n_trials=RERUN_TOP_N)
-
-
 try:
     feature_hyperparam_study.optimize(
         partial(optuna_feature_selection_and_hyperparam_objective, train_split_df=train_split_df),
