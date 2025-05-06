@@ -552,14 +552,16 @@ def add_training_noise(df, features, target,
     # feature noise
     if noise_feature_level > 0:
         for col in features:
-            if pd.api.types.is_numeric_dtype(X[col]) and not pd.api.types.is_categorical_dtype(X[col]):
+            # Numeric columns only, skip categorical dtype
+            if pd.api.types.is_numeric_dtype(X[col]) and not isinstance(X[col].dtype, pd.CategoricalDtype):
                 f_std = X[col].std()
                 if f_std > 0:
                     X[col] += rng.normal(0, noise_feature_level * f_std, size=len(X))
     # bootstrap noise (fractional group-wise resampling)
     if bootstrap_frac > 0 and group_cols:
         idx = []
-        for _, grp in df_noise.groupby(group_cols):
+        # explicit observed=False to suppress future warning
+        for _, grp in df_noise.groupby(group_cols, observed=False):
             inds = grp.index.values
             n = max(1, int(len(inds) * bootstrap_frac))
             idx.extend(rng.choice(inds, size=n, replace=True))
@@ -714,16 +716,16 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             group_cols=GROUP_COLS
         )
         model = LGBMRegressor(**params)
+        # Train with only callbacks for early stopping/pruning
         model.fit(
             X_train, y_train,
             eval_set=[
-                # (train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
                 (X_train, y_train),
                 (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
             ],
             eval_metric=rmsle_lgbm,
             callbacks=callbacks,
-            categorical_feature=categorical_feature,
+            categorical_feature=categorical_feature
         )
         # y_train_pred = model.predict(X_train)
         y_train_pred = model.predict(train_split_df.iloc[train_idx][selected_features])
@@ -887,13 +889,23 @@ class TqdmOptunaCallback:
         reg_rewards = []
         objectives = []
         n_features_list = []
+        # Determine number of objectives in the study
+        directions = getattr(self.study, 'directions', None)
+        n_obj = len(directions) if directions is not None else 1
         for t in trials:
-            if t.values is not None and len(t.values) >= 4:
+            if t.values is not None and len(t.values) >= n_obj:
                 trial_nums.append(t.number)
-                mean_valids.append(t.values[0])
-                gap_penalties.append(t.values[1])
-                complexity_penalties.append(t.values[2])
-                reg_rewards.append(-t.values[3])  # Negated because you minimize -reg_reward
+                # Primary objectives
+                if n_obj >= 1:
+                    mean_valids.append(t.values[0])
+                if n_obj >= 2:
+                    gap_penalties.append(t.values[1])
+                if n_obj >= 3:
+                    complexity_penalties.append(t.values[2])
+                if n_obj >= 4:
+                    # Negate reg_reward objective as it's minimized on -reg_reward
+                    reg_rewards.append(-t.values[3])
+                # Store combined objective and features
                 obj = t.user_attrs.get('objective', None)
                 objectives.append(obj)
                 n_features = t.user_attrs.get('n_features', None)
@@ -974,11 +986,17 @@ class TqdmOptunaCallback:
             mean_valid_label = f"mean_valid (last: {mean_valids[-1]:.4f})" if mean_valids else "mean_valid"
             objective_label = f"objective (last: {objectives[-1]:.4f})" if objectives else "objective"
 
-            pltx.plot(trial_nums, complexity_penalties_scaled, label=complexity_penalty_label, color=tuple([255,0,0]), marker='braille')
-            pltx.plot(trial_nums, reg_rewards_scaled, label=reg_reward_label, color=tuple([128,0,255]), marker='braille')
-            pltx.plot(trial_nums, gap_penalties_scaled, label=gap_penalty_label, color=tuple([0,255,255]), marker='braille')
-            pltx.plot(trial_nums, mean_valids_scaled, label=mean_valid_label, color=tuple([0,255,0]), marker='braille')
-            pltx.plot(trial_nums, objectives_scaled, label=objective_label, color=tuple([255,255,0]), marker='braille')
+            # Plot each objective series if available
+            if mean_valids:
+                pltx.plot(trial_nums, mean_valids_scaled, label=mean_valid_label, color=tuple([0,255,0]), marker='braille')
+            if gap_penalties:
+                pltx.plot(trial_nums, gap_penalties_scaled, label=gap_penalty_label, color=tuple([0,255,255]), marker='braille')
+            if complexity_penalties:
+                pltx.plot(trial_nums, complexity_penalties_scaled, label=complexity_penalty_label, color=tuple([255,0,0]), marker='braille')
+            if reg_rewards:
+                pltx.plot(trial_nums, reg_rewards_scaled, label=reg_reward_label, color=tuple([128,0,255]), marker='braille')
+            if objectives:
+                pltx.plot(trial_nums, objectives_scaled, label=objective_label, color=tuple([255,255,0]), marker='braille')
 
             pltx.title(f'Optuna Objectives (Live) | Best validation: {best_value_str} | Best objective: {best_objective_str}')
             pltx.xlabel('Trial')
