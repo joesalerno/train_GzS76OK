@@ -631,6 +631,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
         ]
 
+    categorical_feature=[col for col in CATEGORICAL_FEATURES if col in selected_features]
+
     for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
         model = LGBMRegressor(**params)
         model.fit(
@@ -642,7 +644,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             ],
             eval_metric=rmsle_lgbm,
             callbacks=callbacks,
-            categorical_feature=CATEGORICAL_FEATURES,
+            categorical_feature=categorical_feature,
         )
         y_train_pred = model.predict(train_split_df.iloc[train_idx][selected_features])
         y_valid_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
