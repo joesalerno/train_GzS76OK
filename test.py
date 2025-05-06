@@ -532,7 +532,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         'boosting_type': boosting_type,
         'max_bin': trial.suggest_int('max_bin', 32, 1024), # Higher max allows finer binning, can help with continuous features
         'objective': 'regression_l1',
-        'n_estimators': 5, # Consider tuning this if using higher learning_rate
+        'n_estimators': 3000, # Consider tuning this if using higher learning_rate
         'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
