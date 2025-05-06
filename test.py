@@ -507,6 +507,46 @@ for order, combos in ALL_COMBOS_STR.items():
     for c in combos:
         assert isinstance(c, str), f"ALL_COMBOS_STR[{order}] contains non-string: {c} ({type(c)})"
 
+# --- Noise injection for robust training ---
+def add_training_noise(df, features, target,
+                       noise_target_level=0.0,
+                       noise_feature_level=0.0,
+                       bootstrap_frac=0.0,
+                       seed=None,
+                       group_cols=None):
+    """
+    Add noise to training data for robustness.
+    noise_target_level: std multiplier for Gaussian noise on target.
+    noise_feature_level: std multiplier for Gaussian noise on numeric features.
+    bootstrap: whether to apply group-wise bootstrap sampling.
+    """
+    df_noise = df.copy()
+    rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
+    X = df_noise[features].copy()
+    y = df_noise[target].copy()
+    # target noise
+    if noise_target_level > 0:
+        y_std = y.std()
+        y += rng.normal(0, noise_target_level * y_std, size=len(y))
+    # feature noise
+    if noise_feature_level > 0:
+        for col in features:
+            if pd.api.types.is_numeric_dtype(X[col]) and not pd.api.types.is_categorical_dtype(X[col]):
+                f_std = X[col].std()
+                if f_std > 0:
+                    X[col] += rng.normal(0, noise_feature_level * f_std, size=len(X))
+    # bootstrap noise (fractional group-wise resampling)
+    if bootstrap_frac > 0 and group_cols:
+        idx = []
+        for _, grp in df_noise.groupby(group_cols):
+            inds = grp.index.values
+            n = max(1, int(len(inds) * bootstrap_frac))
+            idx.extend(rng.choice(inds, size=n, replace=True))
+        X = X.loc[idx].reset_index(drop=True)
+        y = y.loc[idx].reset_index(drop=True)
+    return X, y
+
+
 def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=train_split_df):
     # Hyperparameter search space
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
@@ -516,6 +556,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     else:
         bagging_fraction = 1.0
         bagging_freq = 0
+    # --- Hyperparameters: learning, model params and noise settings ---
     params = {
         'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.5, log=True), # Higher max allows faster learning, but can overfit if too high
         'num_leaves': trial.suggest_int('num_leaves', 4, 512), # Higher max allows more complex trees, but can overfit
@@ -539,6 +580,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         'metric': 'rmsle',
     }
     
+    # Noise injection hyperparameters as continuous tunables
+    noise_target_level = trial.suggest_float('noise_target_level', 0.0, 0.1)
+    noise_feature_level = trial.suggest_float('noise_feature_level', 0.0, 0.1)
+    bootstrap_frac = trial.suggest_float('bootstrap_frac', 0.0, 0.3)
+
     # Find all features with sin/cos in their name (excluding those already in a pair)
     sincos_features = [f for f in FEATURES if re.search(r'(_sin|_cos)', f)]
     pair_map = {}
@@ -634,20 +680,29 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     categorical_feature=[col for col in CATEGORICAL_FEATURES if col in selected_features]
 
     for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
+        # Inject noise into training split
+        train_sub = train_split_df.iloc[train_idx].reset_index(drop=True)
+        X_train, y_train = add_training_noise(
+            train_sub, selected_features, TARGET,
+            noise_target_level=noise_target_level,
+            noise_feature_level=noise_feature_level,
+            bootstrap_frac=bootstrap_frac,
+            seed=SEED + trial.number,
+            group_cols=GROUP_COLS
+        )
+        # Validation data remains unchanged
+        X_valid = train_split_df.iloc[valid_idx][selected_features]
+        y_valid = train_split_df.iloc[valid_idx][TARGET]
         model = LGBMRegressor(**params)
         model.fit(
-            train_split_df.iloc[train_idx][selected_features],
-            train_split_df.iloc[train_idx][TARGET],
-            eval_set=[
-                (train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
-                (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
-            ],
+            X_train, y_train,
+            eval_set=[ (X_train, y_train), (X_valid, y_valid) ],
             eval_metric=rmsle_lgbm,
             callbacks=callbacks,
             categorical_feature=categorical_feature,
         )
-        y_train_pred = model.predict(train_split_df.iloc[train_idx][selected_features])
-        y_valid_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
+        y_train_pred = model.predict(X_train)
+        y_valid_pred = model.predict(X_valid)
         train_score = rmsle(train_split_df.iloc[train_idx][TARGET], y_train_pred)
         valid_score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_valid_pred)
         train_scores.append(train_score)
@@ -1147,6 +1202,10 @@ trials_with_value = [
 if not trials_with_value:
     logging.warning("No Optuna trial with a value found. Skipping feature/param extraction.")
     SELECTED_FEATURES = FEATURES.copy()
+    # No tuned noise parameters
+    tuned_noise_target_level = 0.0
+    tuned_noise_feature_level = 0.0
+    tuned_bootstrap_frac = 0.0
     best_params = final_params.copy()
 else:
     best_trial = min(trials_with_value, key=get_weighted_objective)
@@ -1176,7 +1235,13 @@ else:
     for f in interaction_features:
         if f not in SELECTED_FEATURES:
             SELECTED_FEATURES.append(f)
-    best_params = {k: v for k, v in best_trial.params.items() if k not in FEATURES and not k.endswith('_pair') and not k.startswith('inter_')}
+    # Extract LightGBM params and noise parameters
+    raw_params = {k: v for k, v in best_trial.params.items() if k not in FEATURES and not k.endswith('_pair') and not k.startswith('inter_')}
+    # Tuned noise parameters
+    tuned_noise_target_level = raw_params.pop('noise_target_level', 0.0)
+    tuned_noise_feature_level = raw_params.pop('noise_feature_level', 0.0)
+    tuned_bootstrap_frac = raw_params.pop('bootstrap_frac', 0.0)
+    best_params = raw_params
     logging.info(f"Optuna-selected params: {best_params}")
     logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
     if best_params.get('boosting_type') == 'goss':
@@ -1238,7 +1303,7 @@ def ensure_interaction_features(df, feature_names):
             else:
                 df[f] = 0
     return df
-
+    
 # Apply to all relevant DataFrames
 train_df = ensure_interaction_features(train_df, SELECTED_FEATURES)
 valid_df = ensure_interaction_features(valid_df, SELECTED_FEATURES)
@@ -1287,33 +1352,49 @@ def recursive_predict(model, train_df, predict_df, FEATURES, weekofyear_means=No
     final_predictions['id'] = final_predictions['id'].astype(int)
     return final_predictions.set_index('id')['num_orders']
 
-def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=N_ENSEMBLE_MODELS, eval_metric=None):
+def recursive_ensemble(train_df, test_df, FEATURES,
+                       weekofyear_means=None, month_means=None,
+                       n_models=N_ENSEMBLE_MODELS, eval_metric=None,
+                       noise_target_level=0.0, noise_feature_level=0.0, bootstrap_frac=0.0):
     preds_list = []
     models = []
     for i in tqdm(range(n_models), desc="Ensemble Models", position=0):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
         params = final_params.copy(); params.pop('seed', None)
-        # Optionally, add a small amount of noise to the training targets for robustness
-        # train_y = train_df[TARGET] + np.random.normal(0, 0.01 * train_df[TARGET].std(), size=len(train_df))
-        train_y = train_df[TARGET]
-        model = LGBMRegressor(**params, seed=SEED+i)
+        # Inject noise into training data for robustness
+        X_train, y_train = add_training_noise(
+            train_df, FEATURES, TARGET,
+            noise_target_level=noise_target_level,
+            noise_feature_level=noise_feature_level,
+            bootstrap_frac=bootstrap_frac,
+            seed=SEED + i,
+            group_cols=GROUP_COLS
+        )
+        model = LGBMRegressor(**params, seed=SEED + i)
         if eval_metric:
             model.fit(
-                train_df[FEATURES], train_y,
-                eval_set=[(train_df[FEATURES], train_y), (valid_df[FEATURES], valid_df[TARGET])],
+                X_train, y_train,
+                eval_set=[(X_train, y_train), (valid_df[FEATURES], valid_df[TARGET])],
                 eval_metric=eval_metric,
                 callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)],
                 categorical_feature=CATEGORICAL_FEATURES
             )
         else:
-            model.fit(train_df[FEATURES], train_y, categorical_feature=CATEGORICAL_FEATURES)
+            model.fit(X_train, y_train, categorical_feature=CATEGORICAL_FEATURES)
         preds_list.append(recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values)
         models.append(model)
     return np.mean(preds_list, axis=0).round().astype(int), models
 
 # --- Recursive Ensemble Prediction with Selected Features ---
 logging.info("Running recursive ensemble prediction with selected features...")
-ensemble_preds, ensemble_models = recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means, month_means, n_models=N_ENSEMBLE_MODELS, eval_metric=rmsle_lgbm)
+ensemble_preds, ensemble_models = recursive_ensemble(
+    train_df, test_df, FEATURES, weekofyear_means, month_means,
+    n_models=N_ENSEMBLE_MODELS,
+    eval_metric=rmsle_lgbm,
+    noise_target_level=tuned_noise_target_level,
+    noise_feature_level=tuned_noise_feature_level,
+    bootstrap_frac=tuned_bootstrap_frac
+)
 final_predictions_df = pd.DataFrame({'id': test_df['id'].astype(int), 'num_orders': ensemble_preds})
 submission_path_ensemble_final = os.path.join(OUTPUT_DIRECTORY, f"{SUBMISSION_FILE_PREFIX}_final_optuna_ensemble.csv")
 final_predictions_df.to_csv(submission_path_ensemble_final, index=False)
