@@ -40,8 +40,8 @@ MAX_INTERACTIONS_PER_ORDER = {2: 18, 3: 4, 4: 1, 5: 0}
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
 OPTUNA_MULTI_OBJECTIVE = True  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.05
-OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.00005
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0.5
+OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0001
 OBJECTIVE_WEIGHT_REG_REWARD = 0.001
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 17 # Overfitting detection rounds
@@ -641,7 +641,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
                 (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
             ],
             eval_metric=rmsle_lgbm,
-            callbacks=callbacks
+            callbacks=callbacks,
+            categorical_feature=CATEGORICAL_FEATURES,
         )
         y_train_pred = model.predict(train_split_df.iloc[train_idx][selected_features])
         y_valid_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
@@ -978,10 +979,90 @@ else:
     )
 
 # Pass the study to the callback so it can initialize best_value/best_trial
-
 print (f"Optuna study name: {OPTUNA_STUDY_NAME}")
-
 optuna_callback = TqdmOptunaCallback(OPTUNA_TRIALS, study=feature_hyperparam_study, print_every=1)
+
+
+
+def rerun_old_trials_in_new_study(old_study, new_study, train_split_df=train_split_df, n_trials=None):
+    """
+    Rerun top N trials from old_study in new_study, skipping any with params not valid in the new search space.
+    """
+
+    # Get completed trials sorted by value (lowest first)
+    completed = [t for t in old_study.trials if t.state == 'COMPLETE']
+    completed = sorted(completed, key=lambda t: t.value if hasattr(t, "value") and t.value is not None else float("inf"))
+    if n_trials is not None:
+        completed = completed[:n_trials]
+
+    # Diagnostic: print ALL_COMBOS_STR for each order
+    print("\n[DIAGNOSTIC] ALL_COMBOS_STR (new search space):")
+    for order, combos in ALL_COMBOS_STR.items():
+        print(f"  Order {order}: {len(combos)} combos")
+        if len(combos) <= 10:
+            print(f"    {combos}")
+        else:
+            print(f"    {combos[:5]} ... {combos[-5:]}")
+
+    for t in completed:
+        params = t.params
+        # Diagnostic: print params for this trial
+        print(f"\n[DIAGNOSTIC] Checking trial {t.number} params:")
+        for k, v in params.items():
+            print(f"  {k}: {v}")
+        # Validate all categorical params are still valid in the new search space
+        valid = True
+        for k, v in params.items():
+            # If this is an interaction param, check if the value is in the new ALL_COMBOS_STR
+            if k.startswith("inter_"):
+                order = int(k.split("_")[1][0])
+                if v not in ALL_COMBOS_STR.get(order, []):
+                    print(f"[DIAGNOSTIC]   -> INVALID: {k} value '{v}' not in ALL_COMBOS_STR[{order}]")
+                    valid = False
+                    break
+        if not valid:
+            print(f"Skipping trial {t.number}: param {k} value {v} not in new search space.")
+            continue
+        # Rerun the trial in the new study
+        def fixed_objective(trial, train_split_df):
+            # Set all params as fixed, but for known categoricals use full search space
+            for k, v in params.items():
+                if k == 'boosting_type':
+                    trial.suggest_categorical(k, ['gbdt', 'dart', 'goss'])
+                # Add other known categoricals here as needed
+                elif isinstance(v, bool):
+                    trial.suggest_categorical(k, [True, False])
+                elif isinstance(v, int):
+                    trial.suggest_int(k, v, v)
+                elif isinstance(v, float):
+                    trial.suggest_float(k, v, v)
+                else:
+                    # For interaction features, use the full set from ALL_COMBOS_STR
+                    if k.startswith("inter_"):
+                        order = int(k.split("_")[1][0])
+                        trial.suggest_categorical(k, ALL_COMBOS_STR.get(order, [v]))
+                    else:
+                        trial.suggest_categorical(k, [v])
+            # Call the main objective (with fixed params)
+            return optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=train_split_df)
+        print(f"Rerunning trial {t.number} in new study...")
+        # new_study.optimize(fixed_objective, n_trials=1, catch=(Exception,))
+        new_study.optimize(
+            partial(fixed_objective, train_split_df=train_split_df),
+            n_trials=1,
+            timeout=OPTUNA_TIMEOUT,
+            callbacks=[optuna_callback],
+            n_jobs=1
+        )
+
+# Load the old study and create a new study with the same name
+if RERUN_TOP_N > 0 and RERUN_OPTUNA_STUDY_NAME:
+    print(f"Rerunning top {RERUN_TOP_N} trials from old study '{RERUN_OPTUNA_STUDY_NAME}'...")
+    old_study = optuna.load_study(study_name=RERUN_OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
+    rerun_old_trials_in_new_study(old_study, feature_hyperparam_study, train_split_df=train_split_df, n_trials=RERUN_TOP_N)
+
+
+
 try:
     feature_hyperparam_study.optimize(
         partial(optuna_feature_selection_and_hyperparam_objective, train_split_df=train_split_df),
