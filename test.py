@@ -296,9 +296,20 @@ def rmsle(y_true, y_pred):
     return np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
 
 # --- Custom LightGBM RMSLE metric for sklearn API (LGBMRegressor) ---
-def rmsle_lgbm(y_true, y_pred):
-    """RMSLE metric for LightGBM"""
-    return 'rmsle', rmsle(y_true, y_pred), False # lower is better
+def rmsle_lgbm(a, b):
+    """
+    RMSLE metric supporting both LightGBM train API (preds, dataset)
+    and sklearn API (y_true, y_pred).
+    """
+    # If second arg has get_label, it's dataset
+    if hasattr(b, 'get_label'):
+        preds, dataset = a, b
+        y_true = dataset.get_label()
+        return 'rmsle', rmsle(y_true, preds), False
+    else:
+        # sklearn API: a = y_true, b = y_pred
+        y_true, y_pred = a, b
+        return 'rmsle', rmsle(y_true, y_pred), False
 
 # --- Custom Early Stopping Callback with Overfitting Detection ---
 def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
@@ -314,15 +325,25 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
     prev_valid_loss = [float('inf')]
     def _callback(env):
         # Find train and valid loss
+        # Initialize losses
         train_loss = None
         valid_loss = None
+        # Extract numeric loss from each eval tuple and assign by dataset name
         for eval_tuple in env.evaluation_result_list:
-            name = eval_tuple[0]
-            loss = eval_tuple[1]
-            if 'train' in name:
-                train_loss = loss
-            elif 'valid' in name or 'validation' in name:
-                valid_loss = loss
+            # dataset identifier is first element
+            data_name = eval_tuple[0]
+            # find first numeric non-boolean value in tuple
+            loss = None
+            for v in eval_tuple:
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    loss = v
+                    break
+            if loss is None:
+                continue
+            if 'train' in str(data_name):
+                train_loss = float(loss)
+            elif 'valid' in str(data_name) or 'validation' in str(data_name):
+                valid_loss = float(loss)
         if valid_loss is None or train_loss is None:
             return
         # Early stopping (standard)
@@ -571,11 +592,11 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         'boosting_type': boosting_type,
         'max_bin': trial.suggest_int('max_bin', 32, 1024), # Higher max allows finer binning, can help with continuous features
         'objective': 'regression_l1',
-        'n_estimators': trial.suggest_int('n_estimators', 5, 2000), # Higher max allows more trees, but can overfit
+        'n_estimators': trial.suggest_int('n_estimators', 500, 3000), # Higher max allows more trees, but can overfit
         'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
-        'metric': 'rmsle',
+        'metric': 'None',
     }
     
     # Noise injection hyperparameters as continuous tunables
@@ -662,17 +683,17 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
     if not PRUNING_ENABLED:
         callbacks = [
-            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
         ]
     elif is_multi_objective or OPTUNA_SAMPLER in ["NSGAIISampler", "NSGAIIISampler"]:
         callbacks = [
             CustomPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
-            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
         ]
     else:
         callbacks = [
             LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
-            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=True)
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
         ]
 
     categorical_feature=[col for col in CATEGORICAL_FEATURES if col in selected_features]
@@ -682,24 +703,22 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         train_sub = train_split_df.iloc[train_idx].reset_index(drop=True)
          
         # Debugging: remove noise injection for now
-        X_train, y_train = train_sub[selected_features], train_sub[TARGET]
+        # X_train, y_train = train_sub[selected_features], train_sub[TARGET]
 
-        # X_train, y_train = add_training_noise(
-        #     train_sub, selected_features, TARGET,
-        #     noise_target_level=noise_target_level,
-        #     noise_feature_level=noise_feature_level,
-        #     bootstrap_frac=bootstrap_frac,
-        #     seed=SEED + trial.number,
-        #     group_cols=GROUP_COLS
-        # )
+        X_train, y_train = add_training_noise(
+            train_sub, selected_features, TARGET,
+            noise_target_level=noise_target_level,
+            noise_feature_level=noise_feature_level,
+            bootstrap_frac=bootstrap_frac,
+            seed=SEED + trial.number,
+            group_cols=GROUP_COLS
+        )
         model = LGBMRegressor(**params)
         model.fit(
-            X_train,
-            y_train,
-            # train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET],
+            X_train, y_train,
             eval_set=[
-                (X_train, y_train),
                 # (train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
+                (X_train, y_train),
                 (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
             ],
             eval_metric=rmsle_lgbm,
