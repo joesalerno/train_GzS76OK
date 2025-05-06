@@ -527,7 +527,7 @@ def add_training_noise(df, features, target,
     # target noise
     if noise_target_level > 0:
         y_std = y.std()
-        y += rng.normal(0, noise_target_level * y_std, size=len(y))
+        y += rng.normal(0, noise_target_level * y_std, size=len(y)).clip(0) # Ensure non-negative
     # feature noise
     if noise_feature_level > 0:
         for col in features:
@@ -545,6 +545,7 @@ def add_training_noise(df, features, target,
         X = X.loc[idx].reset_index(drop=True)
         y = y.loc[idx].reset_index(drop=True)
     return X, y
+
 def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=train_split_df):
     # Hyperparameter search space
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt', 'dart', 'goss'])
@@ -679,29 +680,37 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
         # Inject noise into training split
         train_sub = train_split_df.iloc[train_idx].reset_index(drop=True)
-        X_train, y_train = add_training_noise(
-            train_sub, selected_features, TARGET,
-            noise_target_level=noise_target_level,
-            noise_feature_level=noise_feature_level,
-            bootstrap_frac=bootstrap_frac,
-            seed=SEED + trial.number,
-            group_cols=GROUP_COLS
-        )
+         
+        # Debugging: remove noise injection for now
+        X_train, y_train = train_sub[selected_features], train_sub[TARGET]
+
+        # X_train, y_train = add_training_noise(
+        #     train_sub, selected_features, TARGET,
+        #     noise_target_level=noise_target_level,
+        #     noise_feature_level=noise_feature_level,
+        #     bootstrap_frac=bootstrap_frac,
+        #     seed=SEED + trial.number,
+        #     group_cols=GROUP_COLS
+        # )
         model = LGBMRegressor(**params)
         model.fit(
             X_train,
             y_train,
+            # train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET],
             eval_set=[
                 (X_train, y_train),
+                # (train_split_df.iloc[train_idx][selected_features], train_split_df.iloc[train_idx][TARGET]),
                 (train_split_df.iloc[valid_idx][selected_features], train_split_df.iloc[valid_idx][TARGET])
             ],
             eval_metric=rmsle_lgbm,
             callbacks=callbacks,
             categorical_feature=categorical_feature,
         )
-        y_train_pred = model.predict(X_train)
+        # y_train_pred = model.predict(X_train)
+        y_train_pred = model.predict(train_split_df.iloc[train_idx][selected_features])
         y_valid_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
-        train_score = rmsle(y_train, y_train_pred)
+        # train_score = rmsle(y_train, y_train_pred)
+        train_score = rmsle(train_split_df.iloc[train_idx][TARGET], y_train_pred)
         valid_score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_valid_pred)
         train_scores.append(train_score)
         valid_scores.append(valid_score)
@@ -1350,7 +1359,7 @@ def recursive_predict(model, train_df, predict_df, FEATURES, weekofyear_means=No
     final_predictions['id'] = final_predictions['id'].astype(int)
     return final_predictions.set_index('id')['num_orders']
 
-def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=N_ENSEMBLE_MODELS, eval_metric=None):
+def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month_means=None, n_models=N_ENSEMBLE_MODELS, eval_metric=None, noise_target_level=0, noise_feature_level=0, bootstrap_frac=0.0):
     preds_list = []
     models = []
     for i in tqdm(range(n_models), desc="Ensemble Models", position=0):
