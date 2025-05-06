@@ -40,7 +40,7 @@ MAX_INTERACTIONS_PER_ORDER = {2: 18, 3: 4, 4: 1, 5: 0}
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
 OPTUNA_MULTI_OBJECTIVE = True  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.5
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0.3
 OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0001
 OBJECTIVE_WEIGHT_REG_REWARD = 0.001
 N_ENSEMBLE_MODELS = 5
@@ -48,9 +48,9 @@ OVERFIT_ROUNDS = 17 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 200 # Warmup steps for Optuna pruning
 POPULATION_SIZE = 32 # Population size for Genetic algorithm
-# OPTUNA_SAMPLER = "Default"
+OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
-OPTUNA_SAMPLER = "NSGAIIISampler"
+# OPTUNA_SAMPLER = "NSGAIIISampler"
 PRUNING_ENABLED = False # Enable pruning for Optuna trials
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
@@ -402,9 +402,9 @@ class CustomPruningCallback:
                         w = self._objective_weights
                         value = (
                             w[0] * mean_valid +
-                            w[1] * gap_penalty +
-                            w[2] * complexity_penalty +
-                            w[3] * reg_reward
+                            w[1] * gap_penalty
+                            # + w[2] * complexity_penalty +
+                            # w[3] * reg_reward
                         )
                     self._trial.report(value, step=env.iteration)
                     if self._trial.should_prune():
@@ -677,14 +677,15 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Store selected features and objective value for callback/plotting
     trial.set_user_attr('n_features', float(len(selected_features)))
     if (is_multi_objective):
-        objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
+        objective_val = mean_valid + gap_penalty
+        # objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
     else:
         objective_val = mean_valid
     trial.set_user_attr('objective', objective_val)
 
     # Multi-objective: minimize mean_valid, gap_penalty, complexity_penalty, maximize reg_reward (so minimize -reg_reward)
     # If any objective is nan/inf, prune
-    objectives = [mean_valid, gap_penalty, complexity_penalty, -reg_reward]
+    objectives = [mean_valid, gap_penalty]
     if any(np.isnan(obj) or np.isinf(obj) for obj in objectives):
         logging.warning(f"Optuna trial {trial.number} produced invalid objectives: {objectives}.")
         raise optuna.TrialPruned()
@@ -960,7 +961,8 @@ else:
         pruner = optuna.pruners.NopPruner() # No pruning
 
 if (OPTUNA_MULTI_OBJECTIVE):
-    directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
+    directions = ["minimize", "minimize"]  # mean_valid, gap_penalty
+    # directions = ["minimize", "minimize", "minimize", "minimize"]  # mean_valid, gap_penalty, complexity_penalty, -reg_reward
     feature_hyperparam_study = optuna.create_study(
         directions=directions,
         pruner=pruner,
