@@ -1,3 +1,6 @@
+import platform
+import os
+import subprocess
 import time
 import plotext as pltx  # For live ASCII plotting in the console
 
@@ -21,7 +24,6 @@ from optuna.samplers.nsgaii import UniformCrossover, SBXCrossover
 import shap
 
 import re
-import os
 from functools import partial
 from itertools import combinations
 import logging
@@ -48,10 +50,10 @@ N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 17 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 200 # Warmup steps for Optuna pruning
-POPULATION_SIZE = 32 # Population size for Genetic algorithm
-OPTUNA_SAMPLER = "Default"
+POPULATION_SIZE = 50 # Population size for Genetic algorithm
+# OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
-# OPTUNA_SAMPLER = "NSGAIIISampler"
+OPTUNA_SAMPLER = "NSGAIIISampler"
 PRUNING_ENABLED = False # Enable pruning for Optuna trials
 OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
@@ -61,11 +63,26 @@ RERUN_OPTUNA_STUDY_NAME = "recursive_lgbm_tuning" # Study name for rerun
 OPTUNA_STUDY_NAME = "multi_objective_lgbm_tuning"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 # OPTUNA_DB = "postgresql://neondb_owner:npg_b9Jo7RhUgpSd@ep-proud-dust-a4fztafy-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
-OPTUNA_DB = "***REMOVED***"
+
+def get_username():
+    try:
+        if platform.system() == "Windows":
+            return subprocess.check_output("whoami", shell=True).decode().strip().lower()
+        else:
+            return os.environ.get("USER", "").lower()
+    except Exception:
+        return ""
+
+# Use localhost if running on a desktop machine, otherwise use remote server
+if "desktop" in get_username():
+    OPTUNA_DB = "***REMOVED***"
+else:
+    OPTUNA_DB = "***REMOVED***"
 
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
 N_SHAP_SAMPLES = 2000
+
 matplotlib.use('Agg')
 
 os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
