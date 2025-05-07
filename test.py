@@ -40,7 +40,7 @@ MAX_INTERACTIONS_PER_ORDER = {2: 18, 3: 4, 4: 1, 5: 0}
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
 OPTUNA_MULTI_OBJECTIVE = True  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.3
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0.5
 OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0001
 OBJECTIVE_WEIGHT_REG_REWARD = 0.001
 N_ENSEMBLE_MODELS = 5
@@ -295,16 +295,10 @@ def rmsle(y_true, y_pred):
     y_pred = np.array(y_pred).clip(0) # Ensure predictions are non-negative
     return np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
 
-def rmsle_lgbm(a, b):
-    # LightGBM callback for RMSLE
-    if hasattr(b, 'get_label'):
-        preds, dataset = a, b
-        y_true = dataset.get_label()
-        return ('rmsle', rmsle(y_true, preds), False)
-    else:
-        y_true, y_pred = a, b
-        return ('rmsle', rmsle(y_true, y_pred), False)
-
+# --- Custom LightGBM RMSLE metric for sklearn API (LGBMRegressor) ---
+def rmsle_lgbm(y_true, y_pred):
+    """RMSLE metric for LightGBM"""
+    return 'rmsle', rmsle(y_true, y_pred), False # lower is better
 
 # --- Custom Early Stopping Callback with Overfitting Detection ---
 def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
@@ -318,27 +312,19 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
     overfit_count = [0]
     prev_train_loss = [float('inf')]
     prev_valid_loss = [float('inf')]
-
     def _callback(env):
-        # Debugging: Print the evaluation result list
-        # print(f"evaluation_result_list: {env.evaluation_result_list}")
-
         # Find train and valid loss
         train_loss = None
         valid_loss = None
         for eval_tuple in env.evaluation_result_list:
-            data_name = eval_tuple[0]
-            loss = next((v for v in eval_tuple if isinstance(v, (int, float)) and not isinstance(v, bool)), None)
-            if loss is None:
-                continue
-            if 'train' in str(data_name):
-                train_loss = float(loss)
-            elif 'valid' in str(data_name) or 'validation' in str(data_name):
-                valid_loss = float(loss)
-
+            name = eval_tuple[0]
+            loss = eval_tuple[1]
+            if 'train' in name:
+                train_loss = loss
+            elif 'valid' in name or 'validation' in name:
+                valid_loss = loss
         if valid_loss is None or train_loss is None:
-            raise ValueError("Could not find valid or train loss in evaluation result list.")
-
+            return
         # Early stopping (standard)
         if valid_loss < best_score[0]:
             best_score[0] = valid_loss
@@ -350,10 +336,9 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
                 overfit_count[0] += 1
             else:
                 overfit_count[0] = 0
-
         prev_train_loss[0] = train_loss
         prev_valid_loss[0] = valid_loss
-
+        # Verbose
         if verbose and env.iteration % 10 == 0:
             print(f"[Iter {env.iteration}] train: {train_loss:.5f}, valid: {valid_loss:.5f}, overfit_count: {overfit_count[0]}")
         # Stop if overfitting detected
@@ -366,7 +351,6 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
             if verbose:
                 print(f"Stopping early due to no improvement at iteration {env.iteration}")
             raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
-
     return _callback
 
 final_params = {
@@ -590,10 +574,10 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         'max_bin': trial.suggest_int('max_bin', 32, 1024), # Higher max allows finer binning, can help with continuous features
         'objective': 'regression_l1',
         'n_estimators': trial.suggest_int('n_estimators', 500, 3000), # Higher max allows more trees, but can overfit
-        # 'seed': SEED,
+        'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
-        'metric': 'None',
+        'metric': 'rmsle',
     }
     
     # Noise injection hyperparameters as continuous tunables
@@ -656,9 +640,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
                 if new_col_div not in train_split_df.columns and new_col_div not in new_interaction_cols:
                     denominator = train_split_df[combo[1]].replace(0, np.nan)
                     new_interaction_cols[new_col_div] = train_split_df[combo[0]] / denominator + 1e-15 # Avoid division by zero
-                    # TODO TEST THIS LINE BELOW:
-                    new_interaction_cols[new_col_div] = new_interaction_cols[new_col_div].replace([np.inf, -np.inf], 0).fillna(0)
-                    # new_interaction_cols[new_col_div] = new_interaction_cols[new_col_div]
+                    new_interaction_cols[new_col_div] = new_interaction_cols[new_col_div]
                 interaction_features.append(new_col_div)
                 # Polynomial: feature1 * feature2 ** 2
                 new_col_poly2 = f'{combo[0]}_poly2_{combo[1]}'
@@ -674,25 +656,24 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     if len(selected_features) < 10:
         logging.warning(f"Optuna selected {len(selected_features)} features, which is less than 10. This may lead to overfitting.")
         raise optuna.TrialPruned()
-
-    # Use rolling window group time series split
     rgs = ExpandingGroupTimeSeriesSplit(n_splits=5, min_train_window=30, val_window=10, week_col='week')
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
     is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
+    
     if not PRUNING_ENABLED:
         callbacks = [
-            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False),
         ]
     elif is_multi_objective or OPTUNA_SAMPLER in ["NSGAIISampler", "NSGAIIISampler"]:
         callbacks = [
             CustomPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
-            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False),
         ]
     else:
         callbacks = [
             LightGBMPruningCallback(trial, metric='rmsle', valid_name='valid_1'),
-            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
+            early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False),
         ]
 
     categorical_feature=[col for col in CATEGORICAL_FEATURES if col in selected_features]
@@ -710,7 +691,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             seed=SEED + trial.number,
             group_cols=GROUP_COLS
         )
-
         model = LGBMRegressor(**params, seed=SEED + trial.number)
         # Train with only callbacks for early stopping/pruning
         model.fit(
@@ -723,10 +703,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             callbacks=callbacks,
             categorical_feature=categorical_feature
         )
-        # y_train_pred = model.predict(X_train)
         y_train_pred = model.predict(train_split_df.iloc[train_idx][selected_features])
         y_valid_pred = model.predict(train_split_df.iloc[valid_idx][selected_features])
-        # train_score = rmsle(y_train, y_train_pred)
         train_score = rmsle(train_split_df.iloc[train_idx][TARGET], y_train_pred)
         valid_score = rmsle(train_split_df.iloc[valid_idx][TARGET], y_valid_pred)
         train_scores.append(train_score)
@@ -757,7 +735,6 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     trial.set_user_attr('n_features', float(len(selected_features)))
     if (is_multi_objective):
         objective_val = mean_valid + gap_penalty
-        # objective_val = mean_valid + gap_penalty + complexity_penalty + (-reg_reward)
     else:
         objective_val = mean_valid
     trial.set_user_attr('objective', objective_val)
@@ -885,6 +862,7 @@ class TqdmOptunaCallback:
         reg_rewards = []
         objectives = []
         n_features_list = []
+
         # Determine number of objectives in the study
         directions = getattr(self.study, 'directions', None)
         n_obj = len(directions) if directions is not None else 1
@@ -1408,16 +1386,21 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
             seed=SEED + i,
             group_cols=GROUP_COLS
         )
+        
         model = LGBMRegressor(**params, seed=SEED+i)
+        
         model.fit(
             X_train, y_train,
-            eval_set=[(X_train, y_train), (valid_df[FEATURES], valid_df[TARGET])],
+            eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
             eval_metric=eval_metric,
             callbacks=[early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)],
-            categorical_feature=CATEGORICAL_FEATURES
+            categorical_feature=[col for col in CATEGORICAL_FEATURES if col in FEATURES]
         )
+        
+        # After model is trained, get predictions for the test set without noise
         preds_list.append(recursive_predict(model, train_df, test_df, FEATURES, weekofyear_means, month_means).values)
         models.append(model)
+    
     return np.mean(preds_list, axis=0).round().astype(int), models
 
 # --- Recursive Ensemble Prediction with Selected Features ---
