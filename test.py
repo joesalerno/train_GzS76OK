@@ -58,9 +58,9 @@ RERUN_TOP_N = 0 # Number of top trials to rerun for final model training
 RERUN_OPTUNA_STUDY_NAME = "recursive_lgbm_tuning" # Study name for rerun
 
 OPTUNA_STUDY_NAME = "multi_objective_lgbm_tuning"
-# OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
+OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 # OPTUNA_DB = "postgresql://neondb_owner:npg_b9Jo7RhUgpSd@ep-proud-dust-a4fztafy-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
-OPTUNA_DB = "postgresql://postgres:optuna@34.55.13.135:5432/optuna"
+# OPTUNA_DB = "postgresql://postgres:optuna@34.55.13.135:5432/optuna"
 
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
@@ -295,21 +295,16 @@ def rmsle(y_true, y_pred):
     y_pred = np.array(y_pred).clip(0) # Ensure predictions are non-negative
     return np.sqrt(np.mean(np.square(np.log1p(y_pred) - np.log1p(y_true))))
 
-# --- Custom LightGBM RMSLE metric for sklearn API (LGBMRegressor) ---
 def rmsle_lgbm(a, b):
-    """
-    RMSLE metric supporting both LightGBM train API (preds, dataset)
-    and sklearn API (y_true, y_pred).
-    """
-    # If second arg has get_label, it's dataset
+    # LightGBM callback for RMSLE
     if hasattr(b, 'get_label'):
         preds, dataset = a, b
         y_true = dataset.get_label()
-        return 'rmsle', rmsle(y_true, preds), False
+        return ('rmsle', rmsle(y_true, preds), False)
     else:
-        # sklearn API: a = y_true, b = y_pred
         y_true, y_pred = a, b
-        return 'rmsle', rmsle(y_true, y_pred), False
+        return ('rmsle', rmsle(y_true, y_pred), False)
+
 
 # --- Custom Early Stopping Callback with Overfitting Detection ---
 def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
@@ -323,29 +318,27 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
     overfit_count = [0]
     prev_train_loss = [float('inf')]
     prev_valid_loss = [float('inf')]
+
     def _callback(env):
+        # Debugging: Print the evaluation result list
+        # print(f"evaluation_result_list: {env.evaluation_result_list}")
+
         # Find train and valid loss
-        # Initialize losses
         train_loss = None
         valid_loss = None
-        # Extract numeric loss from each eval tuple and assign by dataset name
         for eval_tuple in env.evaluation_result_list:
-            # dataset identifier is first element
             data_name = eval_tuple[0]
-            # find first numeric non-boolean value in tuple
-            loss = None
-            for v in eval_tuple:
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    loss = v
-                    break
+            loss = next((v for v in eval_tuple if isinstance(v, (int, float)) and not isinstance(v, bool)), None)
             if loss is None:
                 continue
             if 'train' in str(data_name):
                 train_loss = float(loss)
             elif 'valid' in str(data_name) or 'validation' in str(data_name):
                 valid_loss = float(loss)
+
         if valid_loss is None or train_loss is None:
-            return
+            raise ValueError("Could not find valid or train loss in evaluation result list.")
+
         # Early stopping (standard)
         if valid_loss < best_score[0]:
             best_score[0] = valid_loss
@@ -357,9 +350,10 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
                 overfit_count[0] += 1
             else:
                 overfit_count[0] = 0
+
         prev_train_loss[0] = train_loss
         prev_valid_loss[0] = valid_loss
-        # Verbose
+
         if verbose and env.iteration % 10 == 0:
             print(f"[Iter {env.iteration}] train: {train_loss:.5f}, valid: {valid_loss:.5f}, overfit_count: {overfit_count[0]}")
         # Stop if overfitting detected
@@ -372,6 +366,7 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
             if verbose:
                 print(f"Stopping early due to no improvement at iteration {env.iteration}")
             raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
+
     return _callback
 
 final_params = {
@@ -595,7 +590,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
         'max_bin': trial.suggest_int('max_bin', 32, 1024), # Higher max allows finer binning, can help with continuous features
         'objective': 'regression_l1',
         'n_estimators': trial.suggest_int('n_estimators', 500, 3000), # Higher max allows more trees, but can overfit
-        'seed': SEED,
+        # 'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
         'metric': 'None',
@@ -661,7 +656,9 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
                 if new_col_div not in train_split_df.columns and new_col_div not in new_interaction_cols:
                     denominator = train_split_df[combo[1]].replace(0, np.nan)
                     new_interaction_cols[new_col_div] = train_split_df[combo[0]] / denominator + 1e-15 # Avoid division by zero
-                    new_interaction_cols[new_col_div] = new_interaction_cols[new_col_div]
+                    # TODO TEST THIS LINE BELOW:
+                    new_interaction_cols[new_col_div] = new_interaction_cols[new_col_div].replace([np.inf, -np.inf], 0).fillna(0)
+                    # new_interaction_cols[new_col_div] = new_interaction_cols[new_col_div]
                 interaction_features.append(new_col_div)
                 # Polynomial: feature1 * feature2 ** 2
                 new_col_poly2 = f'{combo[0]}_poly2_{combo[1]}'
@@ -683,7 +680,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     groups = train_split_df["center_id"]
     train_scores, valid_scores = [], []
     is_multi_objective = isinstance(trial.study.directions, list) and len(trial.study.directions) > 1
-    if not PRUNING_ENABLED == True:
+    if not PRUNING_ENABLED:
         callbacks = [
             early_stopping_with_overfit(300, OVERFIT_ROUNDS, verbose=False)
         ]
@@ -703,9 +700,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     for train_idx, valid_idx in rgs.split(train_split_df, groups=groups):
         # Inject noise into training split
         train_sub = train_split_df.iloc[train_idx].reset_index(drop=True)
-         
-        # Debugging: remove noise injection for now
-        # X_train, y_train = train_sub[selected_features], train_sub[TARGET]
+        # train_sub = train_split_df.iloc[train_idx].copy()
 
         X_train, y_train = add_training_noise(
             train_sub, selected_features, TARGET,
@@ -715,7 +710,8 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             seed=SEED + trial.number,
             group_cols=GROUP_COLS
         )
-        model = LGBMRegressor(**params, SEED=SEED + trial.number)
+
+        model = LGBMRegressor(**params, seed=SEED + trial.number)
         # Train with only callbacks for early stopping/pruning
         model.fit(
             X_train, y_train,
@@ -1402,6 +1398,7 @@ def recursive_ensemble(train_df, test_df, FEATURES, weekofyear_means=None, month
     for i in tqdm(range(n_models), desc="Ensemble Models", position=0):
         logging.info(f"Training ensemble model {i+1}/{n_models}...")
         params = final_params.copy(); params.pop('seed', None)
+
         # Inject noise into training data for robustness
         X_train, y_train = add_training_noise(
             train_df, FEATURES, TARGET,
