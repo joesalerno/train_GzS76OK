@@ -37,7 +37,7 @@ import random
 SEED = random.randint(0, 1000000) # Random seed distributed for each run
 MAX_INTERACTION_ORDER = 4 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
 MAX_INTERACTIONS_PER_ORDER = {2: 18, 3: 4, 4: 1, 5: 0}
-LAGGING_WINDOWS = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14]
+LAG_WINDOWS = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14]
 ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 28, 35, 42, 49, 52]
 OPTUNA_MULTI_OBJECTIVE = True  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
