@@ -171,14 +171,14 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     df_out = create_group_aggregates(df_out)
     df_out, weekofyear_means, month_means = add_seasonality_features(df_out, weekofyear_means, month_means, is_train=is_train)
     # Fill NaNs for all engineered features
-    lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
-        "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_mean", "_std"
-    ])]
-    cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
-    if cols_to_fill:
-        df_out.loc[:, cols_to_fill] = df_out[cols_to_fill].fillna(0)
-    if "discount_pct" in df_out.columns:
-        df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
+    # lag_roll_diff_cols = [col for col in df_out.columns if any(sub in col for sub in [
+    #     "lag_", "rolling_mean", "rolling_std", "price_diff", "_rolling_sum", "_mean", "_std"
+    # ])]
+    # cols_to_fill = [col for col in lag_roll_diff_cols if col in df_out.columns and len(df_out[col]) == len(df_out)]
+    # if cols_to_fill:
+        # df_out.loc[:, cols_to_fill] = df_out[cols_to_fill].fillna(0)
+    # if "discount_pct" in df_out.columns:
+        # df_out["discount_pct"] = df_out["discount_pct"].fillna(0)
     # Defragment and deduplicate DataFrame ONCE at the end
     df_out = df_out.copy()
     df_out = df_out.loc[:, ~df_out.columns.duplicated()]
