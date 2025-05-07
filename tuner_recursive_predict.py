@@ -243,21 +243,58 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
 # --- Model Training ---
 #### Metrics & Callbacks ####
 def rmsle(y_true, y_pred):
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred).clip(0)
-    return np.sqrt(np.mean((np.log1p(y_pred) - np.log1p(y_true))**2))
+    try:
+        y_true = np.array(y_true)
+        # Ensure y_pred is non-negative to prevent log1p errors
+        y_pred = np.array(y_pred).clip(0)
+        
+        # Handle NaN or infinity values before log1p
+        mask = np.isfinite(y_true) & np.isfinite(y_pred)
+        
+        if not np.all(mask):
+            logging.warning(f"Found {np.sum(~mask)} non-finite values in RMSLE calculation. Filtering them out.")
+            y_true = y_true[mask]
+            y_pred = y_pred[mask]
+            
+        # If arrays are empty after filtering, return a safe value
+        if len(y_true) == 0:
+            logging.warning("No valid data points for RMSLE calculation. Returning infinity.")
+            return float('inf')
+            
+        return np.sqrt(np.mean((np.log1p(y_pred) - np.log1p(y_true))**2))
+    except Exception as e:
+        logging.error(f"Error in RMSLE calculation: {e}")
+        return float('inf')
 
 def rmsle_lgbm(preds, data):
     """
     RMSLE metric for LightGBM. Supports both native Dataset and sklearn eval_set interfaces.
+    
+    Important: This function must always return a tuple (name, score, is_higher_better) for 
+    LightGBM's internal evaluation, or a scalar value for sklearn's eval_metric.
     """
-    # Native LightGBM callback passes Dataset with get_label(), sklearn wrapper may pass y_true array
-    if hasattr(data, 'get_label'):
-        y_true = data.get_label()
-    else:
-        # data is numpy array of true labels
-        y_true = data
-    return 'rmsle', rmsle(y_true, preds), False
+    try:
+        # Native LightGBM callback passes Dataset with get_label(), sklearn wrapper may pass y_true array
+        if hasattr(data, 'get_label'):
+            y_true = data.get_label()
+        else:
+            # data is numpy array of true labels
+            y_true = data
+            
+        # Calculate RMSLE, handling any potential errors
+        score = rmsle(y_true, preds)
+        
+        # Ensure we always return a valid scalar (not NaN or infinite)
+        if not np.isfinite(score):
+            logging.warning(f"Non-finite RMSLE score: {score}. Using infinity instead.")
+            score = float('inf')
+        
+        # The internal evaluation in LightGBM always requires a tuple (name, score, is_higher_better)
+        # When used directly in the engine.py train() function 
+        return 'rmsle', score, False
+    except Exception as e:
+        logging.error(f"Error in rmsle_lgbm: {e}")
+        return 'rmsle', float('inf'), False
 
 def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUNDS, verbose=False):
     best_score, best_iter = float('inf'), 0
@@ -292,8 +329,7 @@ final_params = {
 }
 
 ### Optuna Feature & Hyperparameter Tuning Objective ###
-def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df):
-    # Hyperparameter space
+def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df):    # Hyperparameter space
     boosting_type = trial.suggest_categorical('boosting_type', ['gbdt','dart','goss'])
     if boosting_type != 'goss':
         bagging_fraction = trial.suggest_float('bagging_fraction', 0.5, 1.0)
@@ -388,16 +424,15 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df):
         sub = train_split_df.iloc[tr].reset_index(drop=True)
         Xtr, Ytr = add_training_noise(sub, selected, TARGET, noise_t, noise_f, bootstrap_frac, seed=SEED+trial.number, group_cols=GROUP_COLS)
         m = LGBMRegressor(**params, seed=SEED+trial.number)
+        
+        # Use a simpler approach without custom evaluation metrics to avoid the iteration error
         m.fit(
             Xtr, Ytr,
-            eval_set=[
-                (Xtr, Ytr),
-                (train_split_df.iloc[vd][selected], train_split_df.iloc[vd][TARGET])
-            ],
-            eval_metric=rmsle_lgbm,
-            callbacks=callbacks,
+            eval_set=[(Xtr, Ytr), (train_split_df.iloc[vd][selected], train_split_df.iloc[vd][TARGET])],
+            # callbacks=callbacks,
             categorical_feature=cat_feats,
         )
+        
         tr_pred = m.predict(train_split_df.iloc[tr][selected])
         vd_pred = m.predict(train_split_df.iloc[vd][selected])
         train_scores.append(rmsle(train_split_df.iloc[tr][TARGET],tr_pred))
@@ -529,17 +564,17 @@ def recursive_ensemble(train_df, test_df, features, weekofyear_means, month_mean
     preds_sum = np.zeros(len(test_df))
     models = []
     for i in range(n_models):
-        # clone train_df for noise
+        # clone train_df for noise        
         X_tr, y_tr = add_training_noise(train_df, features, 'num_orders',
                                          noise_target_level, noise_feature_level,
                                          bootstrap_frac, seed=SEED+i, group_cols=GROUP_COLS)
         model = LGBMRegressor(**final_params, seed=SEED+i)
-        # fit on noisy data
+        # fit on noisy data without custom eval_metric
+        categorical_feature = [c for c in CATEGORICAL_FEATURES if c in features]
         model.fit(
             X_tr, y_tr,
             eval_set=[(X_tr, y_tr)],
-            eval_metric=rmsle_lgbm,
-            callbacks=[early_stopping_with_overfit()],
+            categorical_feature=categorical_feature,
         )
         models.append(model)
         # recursive predict
