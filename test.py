@@ -316,13 +316,36 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
         # Find train and valid loss
         train_loss = None
         valid_loss = None
-        for eval_tuple in env.evaluation_result_list:
-            name = eval_tuple[0]
-            loss = eval_tuple[1]
-            if 'train' in name:
-                train_loss = float(loss)  # Ensure loss is a float
-            elif 'valid' in name or 'validation' in name:
-                valid_loss = float(loss)  # Ensure loss is a float
+        for item in env.evaluation_result_list:
+            # LightGBM results are in format (data_name, score, is_higher_better) or sometimes (data_name, (metric_name, score, is_higher_better))
+            # Correctly unpack the values based on their structure
+            try:
+                if len(item) == 2:
+                    eval_name, eval_result = item
+                elif len(item) == 3:
+                    eval_name, eval_result, _ = item
+                else:
+                    continue  # Skip if format is unexpected
+                
+                # Extract the score value and ensure it's a float
+                if isinstance(eval_result, tuple):
+                    # Handle (metric_name, score, is_higher_better) format
+                    if len(eval_result) >= 2:
+                        result_value = eval_result[1]  # score is at index 1
+                    else:
+                        result_value = eval_result[0]
+                else:
+                    # Handle case where eval_result is directly the score
+                    result_value = eval_result
+                
+                # Assign to appropriate variable based on dataset name
+                if 'train' in eval_name:
+                    train_loss = float(result_value)
+                elif 'valid' in eval_name or 'validation' in eval_name:
+                    valid_loss = float(result_value)
+            except (ValueError, TypeError, IndexError) as e:
+                # Skip this metric if it can't be processed
+                continue
         if valid_loss is None or train_loss is None:
             return
         # Early stopping (standard)
