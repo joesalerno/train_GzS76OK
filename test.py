@@ -59,9 +59,9 @@ RERUN_TOP_N = 0 # Number of top trials to rerun for final model training
 RERUN_OPTUNA_STUDY_NAME = "recursive_lgbm_tuning" # Study name for rerun
 
 OPTUNA_STUDY_NAME = "multi_objective_lgbm_tuning"
-OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
+# OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 # OPTUNA_DB = "postgresql://neondb_owner:npg_b9Jo7RhUgpSd@ep-proud-dust-a4fztafy-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
-# OPTUNA_DB = "postgresql://postgres:optuna@34.55.13.135:5432/optuna"
+OPTUNA_DB = "postgresql://postgres:optuna@joesalerno.duckdns.org:5432/optuna"
 
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
