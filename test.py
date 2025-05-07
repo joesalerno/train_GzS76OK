@@ -320,9 +320,9 @@ def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=OVERFIT_ROUN
             name = eval_tuple[0]
             loss = eval_tuple[1]
             if 'train' in name:
-                train_loss = loss
+                train_loss = float(loss)  # Ensure loss is a float
             elif 'valid' in name or 'validation' in name:
-                valid_loss = loss
+                valid_loss = float(loss)  # Ensure loss is a float
         if valid_loss is None or train_loss is None:
             return
         # Early stopping (standard)
