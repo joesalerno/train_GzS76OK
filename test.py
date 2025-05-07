@@ -691,7 +691,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
             seed=SEED + trial.number,
             group_cols=GROUP_COLS
         )
-        model = LGBMRegressor(**params, seed=SEED + trial.number)
+        model = LGBMRegressor(**params)
         # Train with only callbacks for early stopping/pruning
         model.fit(
             X_train, y_train,
