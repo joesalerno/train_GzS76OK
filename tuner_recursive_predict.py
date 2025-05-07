@@ -462,7 +462,12 @@ class TqdmOptunaCallback:
         self.best_value = float('inf')
     def __call__(self, study, trial):
         self.pbar.update(1)
-        val = trial.user_attrs.get('objective', trial.value if trial.value is not None else float('inf'))
+        # val = trial.user_attrs.get('objective', trial.value if trial.value is not None else float('inf'))
+        val = trial.user_attrs.get('objective')
+        if val is None:
+            val = get_weighted_objective(trial)
+        if val is None:
+            val = float('inf')
         if val < self.best_value:
             self.best_value = val
             self.best_trial = trial
