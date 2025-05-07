@@ -37,7 +37,8 @@ import random
 SEED = random.randint(0, 1000000) # Random seed distributed for each run
 MAX_INTERACTION_ORDER = 4 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
 MAX_INTERACTIONS_PER_ORDER = {2: 18, 3: 4, 4: 1, 5: 0}
-ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 28, 35, 42, 49, 52]
+LAGGING_WINDOWS = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14]
+ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 28, 35, 42, 49, 52]
 OPTUNA_MULTI_OBJECTIVE = True  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
 OBJECTIVE_WEIGHT_GAP_PENALTY = 0.5
@@ -58,9 +59,9 @@ RERUN_TOP_N = 0 # Number of top trials to rerun for final model training
 RERUN_OPTUNA_STUDY_NAME = "recursive_lgbm_tuning" # Study name for rerun
 
 OPTUNA_STUDY_NAME = "multi_objective_lgbm_tuning"
-OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
+# OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 # OPTUNA_DB = "postgresql://neondb_owner:npg_b9Jo7RhUgpSd@ep-proud-dust-a4fztafy-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
-# OPTUNA_DB = "postgresql://postgres:optuna@34.55.13.135:5432/optuna"
+OPTUNA_DB = "postgresql://postgres:optuna@34.55.13.135:5432/optuna"
 
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
@@ -218,14 +219,14 @@ for f in base_features:
         features_set.add(f)
 
 # Add lag features
-for lag in [1, 2, 3, 5, 10]:
+for lag in LAG_WINDOWS:
     lag_col = f"{TARGET}_lag_{lag}"
     if lag_col in train_df.columns and lag_col not in features_set:
         FEATURES.append(lag_col)
         features_set.add(lag_col)
 
 # Add rolling means/stds
-for w in [2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 21, 28]:
+for w in ROLLING_WINDOWS:
     mean_col = f"{TARGET}_rolling_mean_{w}"
     std_col = f"{TARGET}_rolling_std_{w}"
     if mean_col in train_df.columns and mean_col not in features_set:
