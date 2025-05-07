@@ -73,11 +73,14 @@ def get_username():
     except Exception:
         return ""
 
-# Use localhost if running on a desktop machine, otherwise use remote server
-if "desktop" in get_username():
-    OPTUNA_DB = "***REMOVED***"
-else:
-    OPTUNA_DB = "***REMOVED***"
+# Get PostgreSQL credentials from environment variables or use defaults
+PG_USER = os.environ.get("POSTGRES_USER", "postgres")
+PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
+PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
+PG_DB = os.environ.get("POSTGRES_DB", "optuna")
+
+PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
+OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
