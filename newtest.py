@@ -288,10 +288,6 @@ def create_interaction_features(df):
                 df_out[name] = 0
         
     return df_out
-                logging.warning(f"Skipping triple interaction '{name}' because base feature(s) missing.")
-                df_out[name] = 0
-        
-    return df_out
 
 def create_temporal_features(df):
     """Creates additional temporal features like month."""
