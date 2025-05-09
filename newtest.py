@@ -521,7 +521,7 @@ def get_lgbm(params=None):
         'bagging_freq': 1,
         'lambda_l1': 0.1,
         'lambda_l2': 0.1,
-        'min_child_samples': 20,
+        'min_data_in_leaf': 20,
         'seed': SEED,
         'n_jobs': -1,
         'verbose': -1,
@@ -609,11 +609,11 @@ def objective(trial):
     params = {
         'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.05, log=True),
         'num_leaves': trial.suggest_int('num_leaves', 4, 512),
-        'max_depth': trial.suggest_int('max_depth', 2, 30),
+        'max_depth': trial.suggest_int('max_depth', 2, 15),
         'feature_fraction': trial.suggest_float('feature_fraction', 0.2, 1.0),
         'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
         'bagging_freq': trial.suggest_int('bagging_freq', 0, 10),
-        'min_child_samples': trial.suggest_int('min_child_samples', 10, 2000),
+        'min_data_in_leaf': trial.suggest_int('min_data_in_leaf', 10, 1000),
         'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 1000.0, log=True),
         'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 1000.0, log=True),
     }
@@ -674,8 +674,8 @@ if 'lambda_l1' not in final_params or final_params['lambda_l1'] < 1.0:
     final_params['lambda_l1'] = max(final_params.get('lambda_l1', 0), 5.0)
 if 'lambda_l2' not in final_params or final_params['lambda_l2'] < 1.0:
     final_params['lambda_l2'] = max(final_params.get('lambda_l2', 0), 5.0)
-if 'min_child_samples' not in final_params or final_params['min_child_samples'] < 20:
-    final_params['min_child_samples'] = max(final_params.get('min_child_samples', 0), 100)
+if 'min_data_in_leaf' not in final_params or final_params['min_data_in_leaf'] < 20:
+    final_params['min_data_in_leaf'] = max(final_params.get('min_data_in_leaf', 0), 100)
 
 final_model = LGBMRegressor(**final_params)
 
