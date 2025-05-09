@@ -1,4 +1,5 @@
 import os
+import random
 import pandas as pd
 import numpy as np
 from lightgbm import LGBMRegressor
@@ -15,15 +16,16 @@ DATA_PATH = "train.csv"
 TEST_PATH = "test.csv"
 MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
-SEED = 42
+# SEED = 42
+SEED = random.randint(0, 1000) # Random seed for reproducibility
 LAG_WEEKS = [1, 2, 3, 5, 10] # Lags based on num_orders
 ROLLING_WINDOWS = [2, 3, 5, 10, 14, 21] # Added 14 and 21
 # Other features (not directly dependent on recursive prediction)
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 50 # Number of Optuna trials
-OPTUNA_STUDY_NAME = "newtest"
+OPTUNA_TRIALS = 75 # Number of Optuna trials
+OPTUNA_STUDY_NAME = "newertest"
 PG_USER = os.environ.get("POSTGRES_USER", "postgres")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
@@ -31,8 +33,8 @@ PG_DB = os.environ.get("POSTGRES_DB", "optuna")
 PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
 OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-SUBMISSION_FILE_PREFIX = "newtest"
-SHAP_FILE_PREFIX = "shap_newtest"
+SUBMISSION_FILE_PREFIX = "newertest_submission"
+SHAP_FILE_PREFIX = "shap_newertest"
 N_SHAP_SAMPLES = 2000
 
 # --- Setup Logging ---
@@ -121,6 +123,12 @@ def create_group_aggregates(df):
         df_out['category_orders_mean'] = df_out.groupby('category')['num_orders'].transform('mean')
         df_out['category_orders_median'] = df_out.groupby('category')['num_orders'].transform('median')
         df_out['category_orders_std'] = df_out.groupby('category')['num_orders'].transform('std')
+    
+    # High-value cross aggregates (based on SHAP importance from test.py)
+    df_out['center_meal_orders_mean_prod'] = df_out['center_orders_mean'] * df_out['meal_orders_mean']
+    df_out['center_meal_orders_median_prod'] = df_out['center_orders_median'] * df_out['meal_orders_median']
+    df_out['center_meal_orders_mean_div'] = df_out['center_orders_mean'] / df_out['meal_orders_mean'].replace(0, 1)
+    
     return df_out
 
 def cyclical_encode(df, col, max_val):
@@ -140,18 +148,42 @@ def create_advanced_interactions(df):
         df_out['rolling_mean_2_sq'] = df_out['num_orders_rolling_mean_2'] ** 2
         df_out['rolling_mean_2_sqrt'] = np.sqrt(df_out['num_orders_rolling_mean_2'].clip(0))
     
-    # Add polynomial features for other important numeric columns
-    for col in ['checkout_price', 'base_price', 'discount']:
+    # Extending polynomial features for rolling statistics (important in SHAP)
+    for col in [f'num_orders_rolling_mean_{w}' for w in [3, 5, 14, 21] if f'num_orders_rolling_mean_{w}' in df_out.columns]:
+        df_out[f'{col}_sq'] = df_out[col] ** 2
+        df_out[f'{col}_sqrt'] = np.sqrt(df_out[col].clip(0))
+    
+    # Add polynomial features for important numeric columns
+    for col in ['checkout_price', 'base_price', 'discount', 'discount_pct', 'price_diff',
+                'center_orders_mean', 'meal_orders_mean']:
         if col in df_out.columns:
             df_out[f'{col}_sq'] = df_out[col] ** 2
+    
+    # Add polynomial features for lag variables (highly important in SHAP)
+    for lag in [1, 2, 3, 5, 10]:
+        lag_col = f'num_orders_lag_{lag}'
+        if lag_col in df_out.columns:
+            df_out[f'{lag_col}_sq'] = df_out[lag_col] ** 2
     
     # Ratio features for price-related columns
     if all(c in df_out.columns for c in ['checkout_price', 'base_price']):
         df_out['price_ratio'] = df_out['checkout_price'] / df_out['base_price'].replace(0, np.nan)
+        
+    # Price discount polynomial interactions (from test.py SHAP)
+    if all(c in df_out.columns for c in ['base_price', 'discount_pct']):
+        df_out['base_price_poly2_discount_pct'] = df_out['base_price'] * (df_out['discount_pct'] ** 2)
+        
+    # Promotional polynomial interactions
+    if all(c in df_out.columns for c in ['homepage_featured', 'discount']):
+        df_out['homepage_featured_poly2_discount'] = df_out['homepage_featured'] * (df_out['discount'] ** 2)
     
     # Interactions with seasonality if present
     if all(c in df_out.columns for c in ['mean_orders_by_weekofyear', 'checkout_price']):
         df_out['seasonal_week_x_price'] = df_out['mean_orders_by_weekofyear'] * df_out['checkout_price']
+        
+    # Center-meal interactions (top performers in test.py)
+    if all(c in df_out.columns for c in ['center_orders_mean', 'meal_orders_mean']):
+        df_out['center_orders_mean_poly2_meal_orders_mean'] = df_out['center_orders_mean'] * (df_out['meal_orders_mean'] ** 2)
     
     # Add centered quadratic features for dates to capture non-linear seasonality
     if 'weekofyear' in df_out.columns:
@@ -184,23 +216,42 @@ def create_interaction_features(df):
         # Meal/center aggregates interactions
         "meal_mean_x_discount": ("meal_orders_mean", "discount"),
         "center_mean_x_discount": ("center_orders_mean", "discount"),
+        "discount_pct_x_center_mean": ("discount_pct", "center_orders_mean"),
+        "base_price_x_homepage": ("base_price", "homepage_featured"),
         
-        # Lag and rolling interactions
+        # Lag and rolling interactions (most important according to SHAP)
         "lag1_x_rolling_mean_2": ("num_orders_lag_1", "num_orders_rolling_mean_2"),
         "lag1_x_rolling_mean_3": ("num_orders_lag_1", "num_orders_rolling_mean_3"),
+        "rolling_mean_2_x_rolling_mean_3": ("num_orders_rolling_mean_2", "num_orders_rolling_mean_3"),
+        "lag1_x_lag2": ("num_orders_lag_1", "num_orders_lag_2"),
         
         # Seasonality interactions
         "lag1_x_weekofyear_sin": ("num_orders_lag_1", "weekofyear_sin"),
         "lag1_x_month_sin": ("num_orders_lag_1", "month_sin"),
+        "mean_by_weekofyear_x_checkout": ("mean_orders_by_weekofyear", "checkout_price"),
+        
+        # Price based interactions (from test.py SHAP)
+        "checkout_x_homepage_x_discount": ("checkout_price", "homepage_featured", "discount"),
+        "base_price_x_discount_pct": ("base_price", "discount_pct"),
     }
-    
-    for name, (feat1, feat2) in interactions.items():
-        if feat1 in df_out.columns and feat2 in df_out.columns:
-            df_out[name] = df_out[feat1] * df_out[feat2]
-        else:
-            logging.warning(f"Skipping interaction '{name}' because base feature(s) missing.")
-            df_out[name] = 0 # Add column with default value if base features missing
-
+    for name, features in interactions.items():
+        # Handle both two-feature and three-feature interactions
+        if len(features) == 2:
+            feat1, feat2 = features
+            if feat1 in df_out.columns and feat2 in df_out.columns:
+                df_out[name] = df_out[feat1] * df_out[feat2]
+            else:
+                logging.warning(f"Skipping interaction '{name}' because base feature(s) missing.")
+                df_out[name] = 0  # Add column with default value if base features missing
+        elif len(features) == 3:
+            # Triple interaction
+            feat1, feat2, feat3 = features
+            if feat1 in df_out.columns and feat2 in df_out.columns and feat3 in df_out.columns:
+                df_out[name] = df_out[feat1] * df_out[feat2] * df_out[feat3]
+            else:
+                logging.warning(f"Skipping triple interaction '{name}' because base feature(s) missing.")
+                df_out[name] = 0
+        
     return df_out
 
 def create_temporal_features(df):
@@ -232,18 +283,33 @@ def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_tra
     df_out['mean_orders_by_month'] = df_out['month'].map(month_means)
     return df_out
 
-def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], windows=[2, 3, 5]):
+def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], 
+                       windows=[2, 3, 5, 7, 14, 21]):
     """
     Creates rolling mean features for binary columns like promotions or homepage features.
-    This helps capture the effect of recent marketing activities.
+    This helps capture the effect of recent marketing activities over different time spans.
+    Based on SHAP analysis, these features capture important promotional patterns.
     """
     df_out = df.copy()
     group = df_out.groupby(GROUP_COLS)
     for col in binary_cols:
         if col in df_out.columns:
+            # Shift by 1 to avoid data leakage
             shifted = group[col].shift(1)
+            
+            # Add rolling means
             for window in windows:
                 df_out[f"{col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
+            
+            # Add expanded rolling windows for the most important binary features
+            if col in ["emailer_for_promotion", "homepage_featured"]:
+                for window in [8, 13, 20]:  # Additional windows from test.py SHAP
+                    df_out[f"{col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
+            
+                # Add cumulative sum of promotions in last N periods
+                for window in [4, 8, 12]:
+                    df_out[f"{col}_rolling_sum_{window}"] = shifted.rolling(window, min_periods=1).sum().reset_index(drop=True)
+    
     return df_out
 
 def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_means=None):
@@ -316,12 +382,12 @@ FEATURES += [f"{TARGET}_lag_{lag}" for lag in LAG_WEEKS if f"{TARGET}_lag_{lag}"
 FEATURES += [f"{TARGET}_rolling_mean_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_mean_{w}" in train_df.columns]
 FEATURES += [f"{TARGET}_rolling_std_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_std_{w}" in train_df.columns]
 
-# Add binary rolling means
+# Add binary rolling means with expanded windows
 for col in ["emailer_for_promotion", "homepage_featured"]:
-    FEATURES += [f"{col}_rolling_mean_{w}" for w in [2, 3, 5] if f"{col}_rolling_mean_{w}" in train_df.columns]
+    FEATURES += [f"{col}_rolling_mean_{w}" for w in [2, 3, 5, 7, 8, 13, 14, 20, 21] if f"{col}_rolling_mean_{w}" in train_df.columns]
 
-# Add promo sums
-FEATURES += [f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" for col in OTHER_ROLLING_SUM_COLS if f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}" in train_df.columns]
+# Add promo rolling sums
+FEATURES += [f"{col}_rolling_sum_{w}" for col in OTHER_ROLLING_SUM_COLS for w in [3, 4, 8, 12] if f"{col}_rolling_sum_{w}" in train_df.columns]
 
 # Add all interaction features
 FEATURES += [col for col in train_df.columns if (
@@ -337,11 +403,17 @@ FEATURES += [col for col in train_df.columns if (
 FEATURES += [col for col in train_df.columns if (
     col.endswith("_sq") or 
     col.endswith("_sqrt") or
-    col.startswith(TARGET) and "poly" in col
+    "poly" in col or  # include all polynomial features, not just target ones
+    "center_orders_mean_poly2" in col or
+    "base_price_poly2" in col or
+    "homepage_featured_poly2" in col
 )]
 
 # Add group-level aggregates
 FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["center_orders_", "meal_orders_", "category_orders_"])]
+
+# Add cross-aggregate features (center-meal interactions)
+FEATURES += [col for col in train_df.columns if col.startswith("center_meal_orders_")]
 
 # Add one-hot columns if present
 FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["category_", "cuisine_", "center_type_"])]
@@ -401,6 +473,65 @@ def get_lgbm(params=None):
              default_params['metric'] = 'None'
     return LGBMRegressor(**default_params)
 
+# --- Custom Early Stopping Callback with Overfitting Detection ---
+def early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=15, verbose=False):
+    """
+    Custom LightGBM callback for early stopping with overfitting detection.
+    Stops if validation loss doesn't improve for `stopping_rounds` OR
+    if validation loss increases for `overfit_rounds` while training loss decreases.
+    """
+    best_score = [float('inf')]
+    best_iter = [0]
+    overfit_count = [0]
+    prev_train_loss = [float('inf')]
+    prev_valid_loss = [float('inf')]
+    
+    def _callback(env):
+        # Find train and valid loss
+        train_loss = None
+        valid_loss = None
+        
+        for item in env.evaluation_result_list:
+            if 'train' in item[0]:
+                train_loss = item[1]
+            elif 'valid' in item[0]:
+                valid_loss = item[1]
+                
+        if valid_loss is None or train_loss is None:
+            return
+            
+        # Early stopping (standard)
+        if valid_loss < best_score[0]:
+            best_score[0] = valid_loss
+            best_iter[0] = env.iteration
+            overfit_count[0] = 0
+        else:
+            # Overfitting detection: valid loss increases, train loss decreases
+            if valid_loss > prev_valid_loss[0] and train_loss < prev_train_loss[0]:
+                overfit_count[0] += 1
+            else:
+                overfit_count[0] = 0
+                
+        prev_train_loss[0] = train_loss
+        prev_valid_loss[0] = valid_loss
+        
+        # Verbose
+        if verbose and env.iteration % 10 == 0:
+            logging.info(f"[Iter {env.iteration}] train: {train_loss:.5f}, valid: {valid_loss:.5f}, overfit_count: {overfit_count[0]}")
+            
+        # Stop if overfitting detected
+        if overfit_count[0] >= overfit_rounds:
+            if verbose:
+                logging.info(f"Stopping early due to overfitting at iteration {env.iteration}")
+            raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
+            
+        # Standard early stopping
+        if env.iteration - best_iter[0] >= stopping_rounds:
+            if verbose:
+                logging.info(f"Stopping early due to no improvement at iteration {env.iteration}")
+            raise lgb.callback.EarlyStopException(env.iteration, best_score[0])
+            
+    return _callback
 
 # --- Optuna Hyperparameter Tuning ---
 logging.info("Starting Optuna hyperparameter tuning...")
@@ -440,10 +571,15 @@ def objective(trial):
     model = LGBMRegressor(**params)
     model.fit(
         train_split_df[FEATURES], train_split_df[TARGET],
-        eval_set=[(valid_df[FEATURES], valid_df[TARGET])],
+        eval_set=[
+            (train_split_df[FEATURES], train_split_df[TARGET]),  # Add training set for overfitting detection
+            (valid_df[FEATURES], valid_df[TARGET])
+        ],
         eval_metric=lgb_rmsle, # Use custom RMSLE metric
-        callbacks=[optuna.integration.LightGBMPruningCallback(trial, 'rmsle'), # Pruning based on validation RMSLE
-                   lgb.early_stopping(100, verbose=False)] # Early stopping
+        callbacks=[
+            optuna.integration.LightGBMPruningCallback(trial, 'rmsle'),  # Pruning based on validation RMSLE
+            early_stopping_with_overfit(stopping_rounds=200, overfit_rounds=15, verbose=False)  # Use custom early stopping with overfitting detection
+        ]
     )
     preds = model.predict(valid_df[FEATURES])
     score = rmsle(valid_df[TARGET], preds)
@@ -475,9 +611,21 @@ final_params.update(best_params) # Best params from Optuna override defaults
 
 final_model = LGBMRegressor(**final_params)
 
-# Train on the entire training dataset (train_split_df + valid_df)
-# No early stopping here, train for the specified number of estimators
-final_model.fit(train_df[FEATURES], train_df[TARGET], eval_metric=lgb_rmsle)
+# Train on the entire training dataset with eval set for detecting overfitting
+train_size = int(0.9 * len(train_df))
+train_indices = np.random.choice(len(train_df), train_size, replace=False)
+eval_indices = np.array([i for i in range(len(train_df)) if i not in train_indices])
+
+# Use a small eval set to detect overfitting during final model training
+final_model.fit(
+    train_df[FEATURES], train_df[TARGET], 
+    eval_set=[
+        (train_df.iloc[train_indices][FEATURES], train_df.iloc[train_indices][TARGET]),
+        (train_df.iloc[eval_indices][FEATURES], train_df.iloc[eval_indices][TARGET])
+    ],
+    eval_metric=lgb_rmsle,
+    callbacks=[early_stopping_with_overfit(stopping_rounds=300, overfit_rounds=20, verbose=True)]
+)
 
 # --- Recursive Prediction ---
 logging.info("Starting recursive prediction on the test set...")
