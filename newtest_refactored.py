@@ -723,6 +723,37 @@ def train_final_model(train_df, best_params):
     
     return final_model, val_final, val_preds, features
 
+
+def create_error_correction_report(original_preds, corrected_preds, true_values=None):
+    """
+    Create a report on the impact of error correction.
+    If true values are provided, also includes accuracy metrics.
+    """
+    report = {
+        'n_samples': len(original_preds),
+        'original_mean': np.mean(original_preds),
+        'corrected_mean': np.mean(corrected_preds),
+        'mean_abs_correction': np.mean(np.abs(corrected_preds - original_preds)),
+        'mean_correction': np.mean(corrected_preds - original_preds),
+        'correction_percentage': np.mean((corrected_preds - original_preds) / np.maximum(original_preds, 1)) * 100,
+        'max_correction': np.max(corrected_preds - original_preds),
+        'min_correction': np.min(corrected_preds - original_preds),
+    }
+    
+    # Add accuracy metrics if true values are provided
+    if true_values is not None:
+        report.update({
+            'original_rmsle': rmsle(true_values, original_preds),
+            'corrected_rmsle': rmsle(true_values, corrected_preds),
+            'rmsle_improvement': rmsle(true_values, original_preds) - rmsle(true_values, corrected_preds),
+            'original_mae': np.mean(np.abs(true_values - original_preds)),
+            'corrected_mae': np.mean(np.abs(true_values - corrected_preds)),
+            'mae_improvement': np.mean(np.abs(true_values - original_preds)) - np.mean(np.abs(true_values - corrected_preds)),
+        })
+    
+    return report
+
+
 def generate_predictions(final_model, train_df, test_df, features, weekofyear_means, month_means):
     """
     Generate recursive predictions for the test set with error correction.
@@ -1268,6 +1299,172 @@ def optimize_rmsle_correction(true_values, predicted_values):
     logging.info(f"Optimal RMSLE scaling factor: {best_scaling:.4f} improves score from {rmsle(true_values, predicted_values):.4f} to {best_score:.4f}")
     return best_scaling
 
+
+def visualize_error_correction_impact(validation_df, base_preds, corrected_preds):
+    """
+    Create visualizations showing the impact of error correction on validation data.
+    """
+    try:
+        # Prepare data
+        y_true = validation_df[TARGET].values
+        
+        # Calculate error metrics
+        base_errors = y_true - base_preds
+        corrected_errors = y_true - corrected_preds
+        
+        # Plot 1: Error distribution comparison
+        plt.figure(figsize=(12, 8))
+        plt.subplot(2, 1, 1)
+        plt.hist(base_errors, bins=50, alpha=0.5, label='Base Errors')
+        plt.hist(corrected_errors, bins=50, alpha=0.5, label='Corrected Errors')
+        plt.xlabel('Error Value')
+        plt.ylabel('Frequency')
+        plt.title('Error Distribution: Base vs. Corrected')
+        plt.legend()
+        plt.grid(True)
+        
+        # Plot 2: Actual vs. Predicted scatter comparison
+        plt.subplot(2, 2, 3)
+        plt.scatter(y_true, base_preds, alpha=0.5, s=10)
+        plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'r--', lw=2)
+        plt.xlabel('Actual')
+        plt.ylabel('Predicted')
+        plt.title(f'Base Predictions\nRMSLE: {rmsle(y_true, base_preds):.4f}')
+        plt.grid(True)
+        
+        plt.subplot(2, 2, 4)
+        plt.scatter(y_true, corrected_preds, alpha=0.5, s=10)
+        plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'r--', lw=2)
+        plt.xlabel('Actual')
+        plt.ylabel('Predicted')
+        plt.title(f'Corrected Predictions\nRMSLE: {rmsle(y_true, corrected_preds):.4f}')
+        plt.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(f"{SUBMISSION_FILE_PREFIX}_error_correction_impact.png")
+        plt.close()
+        
+        # Plot 3: Error by order volume
+        plt.figure(figsize=(10, 6))
+        
+        # Group by order volume bins
+        order_bins = np.linspace(0, np.percentile(y_true, 99), 10)
+        bin_indices = np.digitize(y_true, order_bins)
+        
+        base_error_by_bin = [np.mean(np.abs(base_errors[bin_indices == i])) for i in range(1, len(order_bins) + 1)]
+        corrected_error_by_bin = [np.mean(np.abs(corrected_errors[bin_indices == i])) for i in range(1, len(order_bins) + 1)]
+        bin_centers = [(order_bins[i] + order_bins[i-1])/2 for i in range(1, len(order_bins))]
+        
+        plt.bar(bin_centers, base_error_by_bin, width=order_bins[1]-order_bins[0], alpha=0.5, label='Base Errors')
+        plt.bar(bin_centers, corrected_error_by_bin, width=order_bins[1]-order_bins[0], alpha=0.5, label='Corrected Errors')
+        plt.xlabel('Order Volume')
+        plt.ylabel('Mean Absolute Error')
+        plt.title('Error by Order Volume')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f"{SUBMISSION_FILE_PREFIX}_error_by_volume.png")
+        plt.close()
+        
+        logging.info("Error correction impact visualizations created")
+        
+    except Exception as e:
+        logging.error(f"Error creating error correction visualizations: {e}")
+        import traceback
+        traceback.print_exc()
+
+def evaluate_error_correction(final_model, validation_df, features, weekofyear_means, month_means):
+    """
+    Evaluate different error correction strategies on validation data.
+    This helps us understand which strategies are most effective.
+    """
+    logging.info("Evaluating error correction strategies on validation data...")
+    
+    # Extract validation data
+    X_valid = validation_df[features]
+    y_valid = validation_df[TARGET].values
+    
+    # Get raw predictions from the model (no error correction)
+    raw_preds = final_model.predict(X_valid)
+    raw_preds = np.clip(raw_preds, 0, None)
+    base_rmsle = rmsle(y_valid, raw_preds)
+    logging.info(f"Base model RMSLE (no error correction): {base_rmsle:.5f}")
+    
+    # Evaluate RMSLE scaling
+    scaling_factor = optimize_rmsle_correction(y_valid, raw_preds)
+    scaled_preds = raw_preds * scaling_factor
+    scaled_rmsle = rmsle(y_valid, scaled_preds)
+    logging.info(f"RMSLE with scaling factor ({scaling_factor:.4f}): {scaled_rmsle:.5f} (improvement: {base_rmsle - scaled_rmsle:.5f})")
+    
+    # Build error correction model
+    error_model, error_features = build_error_correction_model(validation_df, features, y_valid, raw_preds)
+    
+    if error_model is not None and error_features:
+        # Apply error model correction
+        error_preds = raw_preds + error_model.predict(validation_df[error_features])
+        error_preds = np.clip(error_preds, 0, None)
+        error_rmsle = rmsle(y_valid, error_preds)
+        logging.info(f"RMSLE with error model: {error_rmsle:.5f} (improvement: {base_rmsle - error_rmsle:.5f})")
+        
+        # Combine scaling and error model
+        combined_preds = scaled_preds + 0.5 * error_model.predict(validation_df[error_features])
+        combined_preds = np.clip(combined_preds, 0, None)
+        combined_rmsle = rmsle(y_valid, combined_preds)
+        logging.info(f"RMSLE with combined correction: {combined_rmsle:.5f} (improvement: {base_rmsle - combined_rmsle:.5f})")
+    
+    # Evaluate seasonality-based correction
+    correction_factors = get_error_correction_factors(validation_df, validation_df['week'].max(), weekofyear_means, month_means)
+    
+    if 'similar_weekofyear_mean' in correction_factors and 'similar_month_mean' in correction_factors:
+        # Create seasonal baseline predictions
+        seasonality_baseline = (
+            correction_factors['similar_weekofyear_mean'] * 0.6 + 
+            correction_factors['similar_month_mean'] * 0.4
+        )
+        
+        # Blend with raw predictions (20% seasonal)
+        seasonal_blend_preds = 0.8 * raw_preds + 0.2 * seasonality_baseline
+        seasonal_blend_preds = np.clip(seasonal_blend_preds, 0, None)
+        seasonal_rmsle = rmsle(y_valid, seasonal_blend_preds)
+        logging.info(f"RMSLE with 20% seasonal blend: {seasonal_rmsle:.5f} (improvement: {base_rmsle - seasonal_rmsle:.5f})")
+      # Create a comprehensive error correction report
+    strategies = {
+        'base': raw_preds,
+        'scaling': scaled_preds
+    }
+    
+    if error_model is not None:
+        strategies['error_model'] = error_preds
+        strategies['combined'] = combined_preds
+    
+    if 'similar_weekofyear_mean' in correction_factors:
+        strategies['seasonal_blend'] = seasonal_blend_preds
+    
+    # Create report
+    report_data = []
+    for name, preds in strategies.items():
+        score = rmsle(y_valid, preds)
+        improvement = base_rmsle - score
+        pct_improvement = 100 * improvement / base_rmsle
+        report_data.append({
+            'strategy': name,
+            'rmsle': score,
+            'improvement': improvement,
+            'pct_improvement': pct_improvement
+        })
+    
+    report_df = pd.DataFrame(report_data).sort_values('rmsle')
+    report_df.to_csv(f"{SUBMISSION_FILE_PREFIX}_error_correction_evaluation.csv", index=False)
+    logging.info(f"Error correction evaluation saved to {SUBMISSION_FILE_PREFIX}_error_correction_evaluation.csv")
+    
+    # Visualize the impact of the best error correction method
+    if len(report_df) > 1:
+        best_strategy = report_df.iloc[0]['strategy']
+        best_preds = strategies[best_strategy]
+        visualize_error_correction_impact(validation_df, raw_preds, best_preds)
+
+    return report_df
+
+
 # --- Main Execution Flow ---
 def main():
     # --- Load Data ---
@@ -1380,196 +1577,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-def create_error_correction_report(original_preds, corrected_preds, true_values=None):
-    """
-    Create a report on the impact of error correction.
-    If true values are provided, also includes accuracy metrics.
-    """
-    report = {
-        'n_samples': len(original_preds),
-        'original_mean': np.mean(original_preds),
-        'corrected_mean': np.mean(corrected_preds),
-        'mean_abs_correction': np.mean(np.abs(corrected_preds - original_preds)),
-        'mean_correction': np.mean(corrected_preds - original_preds),
-        'correction_percentage': np.mean((corrected_preds - original_preds) / np.maximum(original_preds, 1)) * 100,
-        'max_correction': np.max(corrected_preds - original_preds),
-        'min_correction': np.min(corrected_preds - original_preds),
-    }
-    
-    # Add accuracy metrics if true values are provided
-    if true_values is not None:
-        report.update({
-            'original_rmsle': rmsle(true_values, original_preds),
-            'corrected_rmsle': rmsle(true_values, corrected_preds),
-            'rmsle_improvement': rmsle(true_values, original_preds) - rmsle(true_values, corrected_preds),
-            'original_mae': np.mean(np.abs(true_values - original_preds)),
-            'corrected_mae': np.mean(np.abs(true_values - corrected_preds)),
-            'mae_improvement': np.mean(np.abs(true_values - original_preds)) - np.mean(np.abs(true_values - corrected_preds)),
-        })
-    
-    return report
-
-def evaluate_error_correction(final_model, validation_df, features, weekofyear_means, month_means):
-    """
-    Evaluate different error correction strategies on validation data.
-    This helps us understand which strategies are most effective.
-    """
-    logging.info("Evaluating error correction strategies on validation data...")
-    
-    # Extract validation data
-    X_valid = validation_df[features]
-    y_valid = validation_df[TARGET].values
-    
-    # Get raw predictions from the model (no error correction)
-    raw_preds = final_model.predict(X_valid)
-    raw_preds = np.clip(raw_preds, 0, None)
-    base_rmsle = rmsle(y_valid, raw_preds)
-    logging.info(f"Base model RMSLE (no error correction): {base_rmsle:.5f}")
-    
-    # Evaluate RMSLE scaling
-    scaling_factor = optimize_rmsle_correction(y_valid, raw_preds)
-    scaled_preds = raw_preds * scaling_factor
-    scaled_rmsle = rmsle(y_valid, scaled_preds)
-    logging.info(f"RMSLE with scaling factor ({scaling_factor:.4f}): {scaled_rmsle:.5f} (improvement: {base_rmsle - scaled_rmsle:.5f})")
-    
-    # Build error correction model
-    error_model, error_features = build_error_correction_model(validation_df, features, y_valid, raw_preds)
-    
-    if error_model is not None and error_features:
-        # Apply error model correction
-        error_preds = raw_preds + error_model.predict(validation_df[error_features])
-        error_preds = np.clip(error_preds, 0, None)
-        error_rmsle = rmsle(y_valid, error_preds)
-        logging.info(f"RMSLE with error model: {error_rmsle:.5f} (improvement: {base_rmsle - error_rmsle:.5f})")
-        
-        # Combine scaling and error model
-        combined_preds = scaled_preds + 0.5 * error_model.predict(validation_df[error_features])
-        combined_preds = np.clip(combined_preds, 0, None)
-        combined_rmsle = rmsle(y_valid, combined_preds)
-        logging.info(f"RMSLE with combined correction: {combined_rmsle:.5f} (improvement: {base_rmsle - combined_rmsle:.5f})")
-    
-    # Evaluate seasonality-based correction
-    correction_factors = get_error_correction_factors(validation_df, validation_df['week'].max(), weekofyear_means, month_means)
-    
-    if 'similar_weekofyear_mean' in correction_factors and 'similar_month_mean' in correction_factors:
-        # Create seasonal baseline predictions
-        seasonality_baseline = (
-            correction_factors['similar_weekofyear_mean'] * 0.6 + 
-            correction_factors['similar_month_mean'] * 0.4
-        )
-        
-        # Blend with raw predictions (20% seasonal)
-        seasonal_blend_preds = 0.8 * raw_preds + 0.2 * seasonality_baseline
-        seasonal_blend_preds = np.clip(seasonal_blend_preds, 0, None)
-        seasonal_rmsle = rmsle(y_valid, seasonal_blend_preds)
-        logging.info(f"RMSLE with 20% seasonal blend: {seasonal_rmsle:.5f} (improvement: {base_rmsle - seasonal_rmsle:.5f})")
-      # Create a comprehensive error correction report
-    strategies = {
-        'base': raw_preds,
-        'scaling': scaled_preds
-    }
-    
-    if error_model is not None:
-        strategies['error_model'] = error_preds
-        strategies['combined'] = combined_preds
-    
-    if 'similar_weekofyear_mean' in correction_factors:
-        strategies['seasonal_blend'] = seasonal_blend_preds
-    
-    # Create report
-    report_data = []
-    for name, preds in strategies.items():
-        score = rmsle(y_valid, preds)
-        improvement = base_rmsle - score
-        pct_improvement = 100 * improvement / base_rmsle
-        report_data.append({
-            'strategy': name,
-            'rmsle': score,
-            'improvement': improvement,
-            'pct_improvement': pct_improvement
-        })
-    
-    report_df = pd.DataFrame(report_data).sort_values('rmsle')
-    report_df.to_csv(f"{SUBMISSION_FILE_PREFIX}_error_correction_evaluation.csv", index=False)
-    logging.info(f"Error correction evaluation saved to {SUBMISSION_FILE_PREFIX}_error_correction_evaluation.csv")
-    
-    # Visualize the impact of the best error correction method
-    if len(report_df) > 1:
-        best_strategy = report_df.iloc[0]['strategy']
-        best_preds = strategies[best_strategy]
-        visualize_error_correction_impact(validation_df, raw_preds, best_preds)
-    
-    return report_df
-
-def visualize_error_correction_impact(validation_df, base_preds, corrected_preds):
-    """
-    Create visualizations showing the impact of error correction on validation data.
-    """
-    try:
-        # Prepare data
-        y_true = validation_df[TARGET].values
-        
-        # Calculate error metrics
-        base_errors = y_true - base_preds
-        corrected_errors = y_true - corrected_preds
-        
-        # Plot 1: Error distribution comparison
-        plt.figure(figsize=(12, 8))
-        plt.subplot(2, 1, 1)
-        plt.hist(base_errors, bins=50, alpha=0.5, label='Base Errors')
-        plt.hist(corrected_errors, bins=50, alpha=0.5, label='Corrected Errors')
-        plt.xlabel('Error Value')
-        plt.ylabel('Frequency')
-        plt.title('Error Distribution: Base vs. Corrected')
-        plt.legend()
-        plt.grid(True)
-        
-        # Plot 2: Actual vs. Predicted scatter comparison
-        plt.subplot(2, 2, 3)
-        plt.scatter(y_true, base_preds, alpha=0.5, s=10)
-        plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'r--', lw=2)
-        plt.xlabel('Actual')
-        plt.ylabel('Predicted')
-        plt.title(f'Base Predictions\nRMSLE: {rmsle(y_true, base_preds):.4f}')
-        plt.grid(True)
-        
-        plt.subplot(2, 2, 4)
-        plt.scatter(y_true, corrected_preds, alpha=0.5, s=10)
-        plt.plot([y_true.min(), y_true.max()], [y_true.min(), y_true.max()], 'r--', lw=2)
-        plt.xlabel('Actual')
-        plt.ylabel('Predicted')
-        plt.title(f'Corrected Predictions\nRMSLE: {rmsle(y_true, corrected_preds):.4f}')
-        plt.grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(f"{SUBMISSION_FILE_PREFIX}_error_correction_impact.png")
-        plt.close()
-        
-        # Plot 3: Error by order volume
-        plt.figure(figsize=(10, 6))
-        
-        # Group by order volume bins
-        order_bins = np.linspace(0, np.percentile(y_true, 99), 10)
-        bin_indices = np.digitize(y_true, order_bins)
-        
-        base_error_by_bin = [np.mean(np.abs(base_errors[bin_indices == i])) for i in range(1, len(order_bins) + 1)]
-        corrected_error_by_bin = [np.mean(np.abs(corrected_errors[bin_indices == i])) for i in range(1, len(order_bins) + 1)]
-        bin_centers = [(order_bins[i] + order_bins[i-1])/2 for i in range(1, len(order_bins))]
-        
-        plt.bar(bin_centers, base_error_by_bin, width=order_bins[1]-order_bins[0], alpha=0.5, label='Base Errors')
-        plt.bar(bin_centers, corrected_error_by_bin, width=order_bins[1]-order_bins[0], alpha=0.5, label='Corrected Errors')
-        plt.xlabel('Order Volume')
-        plt.ylabel('Mean Absolute Error')
-        plt.title('Error by Order Volume')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(f"{SUBMISSION_FILE_PREFIX}_error_by_volume.png")
-        plt.close()
-        
-        logging.info("Error correction impact visualizations created")
-        
-    except Exception as e:
-        logging.error(f"Error creating error correction visualizations: {e}")
-        import traceback
-        traceback.print_exc()
