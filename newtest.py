@@ -541,21 +541,21 @@ try:
     study = optuna.load_study(study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
     logging.info(f"Loaded existing Optuna study from {OPTUNA_DB}")
 except Exception:
-    study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB)
+    study = optuna.create_study(direction="minimize", study_name=OPTUNA_STUDY_NAME, storage=OPTUNA_DB, sampler=optuna.samplers.TPESampler(constant_liar=True))
     logging.info(f"Created new Optuna study at {OPTUNA_DB}")
 
 def objective(trial):
     """Optuna objective function."""
     params = {
-        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),
-        'num_leaves': trial.suggest_int('num_leaves', 10, 64),
-        'max_depth': trial.suggest_int('max_depth', 3, 8),
-        'feature_fraction': trial.suggest_float('feature_fraction', 0.6, 1.0),
-        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.6, 1.0),
-        'bagging_freq': trial.suggest_int('bagging_freq', 1, 7),
-        'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
-        'lambda_l1': trial.suggest_float('lambda_l1', 1e-3, 10.0, log=True),
-        'lambda_l2': trial.suggest_float('lambda_l2', 1e-3, 10.0, log=True),
+        'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.05, log=True),
+        'num_leaves': trial.suggest_int('num_leaves', 4, 512),
+        'max_depth': trial.suggest_int('max_depth', 2, 30),
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.2, 1.0),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
+        'bagging_freq': trial.suggest_int('bagging_freq', 0, 10),
+        'min_child_samples': trial.suggest_int('min_child_samples', 10, 2000),
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 1000.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 1000.0, log=True),
     }
     # Add fixed params
     params.update({
