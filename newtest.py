@@ -709,8 +709,132 @@ val_preds = final_model.predict(val_final[FEATURES])
 val_rmsle = rmsle(val_final[TARGET], val_preds)
 logging.info(f"Final model validation RMSLE: {val_rmsle:.5f}")
 
-# --- Recursive Prediction ---
-logging.info("Starting recursive prediction on the test set...")
+# --- Enhanced Error Correction Utilities ---
+def compute_error_metrics(y_true, y_pred):
+    """Calculate comprehensive error statistics from validation data."""
+    errors = y_true - y_pred
+    relative_errors = errors / np.maximum(y_true, 1)  # Avoid division by zero
+    
+    # Calculate standard error metrics
+    error_stats = {
+        'mean_error': np.mean(errors),
+        'median_error': np.median(errors),
+        'std_error': np.std(errors),
+        'mae': np.mean(np.abs(errors)),
+        'mape': np.mean(np.abs(relative_errors)) * 100,
+        'rmse': np.sqrt(np.mean(np.square(errors))),
+        'rmsle_original': rmsle(y_true, y_pred)
+    }
+    
+    # Calculate quantile errors for more robust correction
+    for q in [0.1, 0.25, 0.5, 0.75, 0.9]:
+        error_stats[f'q{int(q*100)}_error'] = np.quantile(errors, q)
+    
+    # Calculate segment-specific errors for more targeted correction
+    segments = {}
+    
+    # Low/medium/high value segments
+    low_mask = y_true <= np.quantile(y_true, 0.33)
+    med_mask = (y_true > np.quantile(y_true, 0.33)) & (y_true <= np.quantile(y_true, 0.67))
+    high_mask = y_true > np.quantile(y_true, 0.67)
+    
+    segments['low_value'] = errors[low_mask].mean() if np.any(low_mask) else 0
+    segments['med_value'] = errors[med_mask].mean() if np.any(med_mask) else 0
+    segments['high_value'] = errors[high_mask].mean() if np.any(high_mask) else 0
+    
+    error_stats['segments'] = segments
+    
+    return error_stats
+
+def find_optimal_offset(y_true, y_pred):
+    """Find the best additive correction (offset) that minimizes RMSLE."""
+    offsets = np.linspace(-5, 5, 101)  # Test offsets from -5 to +5
+    best_offset = 0
+    best_rmsle = rmsle(y_true, y_pred)
+    
+    for offset in offsets:
+        adjusted_preds = y_pred + offset
+        adjusted_preds = np.maximum(adjusted_preds, 0)  # Ensure non-negative
+        current_rmsle = rmsle(y_true, adjusted_preds)
+        
+        if current_rmsle < best_rmsle:
+            best_rmsle = current_rmsle
+            best_offset = offset
+    
+    improvement = rmsle(y_true, y_pred) - best_rmsle
+    return best_offset, improvement
+
+def find_optimal_scaling(y_true, y_pred):
+    """Find the best multiplicative correction (scaling) that minimizes RMSLE."""
+    scales = np.linspace(0.85, 1.15, 61)  # More focused range
+    best_scale = 1.0
+    best_rmsle = rmsle(y_true, y_pred)
+    
+    for scale in scales:
+        adjusted_preds = y_pred * scale
+        current_rmsle = rmsle(y_true, adjusted_preds)
+        
+        if current_rmsle < best_rmsle:
+            best_rmsle = current_rmsle
+            best_scale = scale
+    
+    improvement = rmsle(y_true, y_pred) - best_rmsle
+    return best_scale, improvement
+
+def get_seasonality_factors(df, week_num, weekofyear_means, month_means):
+    """Get seasonality-based correction factors for the given prediction week."""
+    week_data = df[df['week'] == week_num]
+    if len(week_data) == 0:
+        return None
+    
+    weekofyear = week_data['weekofyear'].iloc[0]
+    month = week_data['month'].iloc[0]
+    
+    # Get statistics from similar weeks/months in training data
+    similar_week_mask = df['weekofyear'] == weekofyear
+    similar_month_mask = df['month'] == month
+    
+    # Create a collection of seasonality statistics
+    seasonality = {}
+    
+    # Global means from pre-computed aggregates
+    if weekofyear in weekofyear_means.index:
+        seasonality['weekofyear_mean'] = weekofyear_means[weekofyear]
+    else:
+        seasonality['weekofyear_mean'] = df[~df[TARGET].isna()][TARGET].mean()
+        
+    if month in month_means.index:
+        seasonality['month_mean'] = month_means[month]
+    else:
+        seasonality['month_mean'] = df[~df[TARGET].isna()][TARGET].mean()
+    
+    # Calculate actual means from similar periods in training data
+    if np.sum(similar_week_mask & ~df[TARGET].isna()) > 10:  # Only if we have enough samples
+        seasonality['similar_weekofyear_actual'] = df.loc[similar_week_mask & ~df[TARGET].isna(), TARGET].mean()
+    
+    if np.sum(similar_month_mask & ~df[TARGET].isna()) > 10:
+        seasonality['similar_month_actual'] = df.loc[similar_month_mask & ~df[TARGET].isna(), TARGET].mean()
+    
+    return seasonality
+
+def validate_error_correction(y_true, y_pred, correction_fn, *args):
+    """Test if a correction function actually improves predictions."""
+    base_rmsle = rmsle(y_true, y_pred)
+    corrected_preds = correction_fn(y_pred, *args)
+    corrected_rmsle = rmsle(y_true, corrected_preds)
+    
+    # Only return the correction if it actually helps
+    if corrected_rmsle < base_rmsle:
+        improvement = base_rmsle - corrected_rmsle
+        return corrected_preds, improvement
+    else:
+        return y_pred, 0.0
+
+# --- End Enhanced Error Correction Utilities ---
+
+# --- Recursive Prediction with Error Correction ---
+logging.info("Starting recursive prediction with error correction on the test set...")
+
 # Prepare the combined data history (training data + test structure)
 # We need the structure of test_df but will fill num_orders recursively
 history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["center_id", "meal_id", "week"]).reset_index(drop=True)
@@ -719,7 +843,85 @@ history_df = pd.concat([train_df, test_df], ignore_index=True).sort_values(["cen
 weekofyear_means = train_df.groupby('weekofyear')['num_orders'].mean()
 month_means = train_df.groupby('month')['num_orders'].mean()
 
+# Create a validation dataset from the most recent training data for error correction calibration
+train_weeks = sorted(train_df['week'].unique())
+validation_weeks = train_weeks[-VALIDATION_WEEKS:]
+validation_df = train_df[train_df['week'].isin(validation_weeks)].copy()
+    
+# Generate validation predictions to measure error patterns
+validation_features = validation_df[FEATURES].copy()
+missing_val_cols = [col for col in FEATURES if col not in validation_features.columns]
+for col in missing_val_cols:
+    validation_features[col] = 0
+validation_preds = final_model.predict(validation_features)
+validation_true = validation_df[TARGET].values
+
+# Calculate detailed error statistics
+logging.info("Calculating error correction parameters from validation data...")
+error_metrics = compute_error_metrics(validation_true, validation_preds)
+logging.info(f"Validation error statistics: {error_metrics}")
+
+# Find optimal offset and scaling corrections
+offset, offset_improvement = find_optimal_offset(validation_true, validation_preds)
+scaling, scaling_improvement = find_optimal_scaling(validation_true, validation_preds)
+
+logging.info(f"Optimal offset: {offset:.4f} (RMSLE improvement: {offset_improvement:.4f})")
+logging.info(f"Optimal scaling factor: {scaling:.4f} (RMSLE improvement: {scaling_improvement:.4f})")
+
+# Determine which correction gives better improvement
+if offset_improvement > scaling_improvement:
+    logging.info(f"Using offset-based correction (better improvement)")
+    primary_correction = "offset"
+    correction_value = offset
+    correction_improvement = offset_improvement
+else:
+    logging.info(f"Using scaling-based correction (better improvement)")
+    primary_correction = "scaling"
+    correction_value = scaling
+    correction_improvement = scaling_improvement
+
+# Create segment-based error correction for different value ranges
+# This helps correct errors differently for small, medium, and large prediction values
+validation_df['pred'] = validation_preds
+validation_df['error'] = validation_true - validation_preds
+validation_df['relative_error'] = validation_df['error'] / np.maximum(validation_true, 1)
+
+# Segment by prediction value
+low_threshold = np.percentile(validation_preds, 33)
+high_threshold = np.percentile(validation_preds, 67)
+
+validation_df['value_segment'] = 'medium'
+validation_df.loc[validation_df['pred'] <= low_threshold, 'value_segment'] = 'low'
+validation_df.loc[validation_df['pred'] > high_threshold, 'value_segment'] = 'high'
+
+# Calculate segment-specific corrections
+segment_corrections = {}
+segment_scaling = {}
+
+for segment in ['low', 'medium', 'high']:
+    segment_mask = validation_df['value_segment'] == segment
+    if sum(segment_mask) >= 20:  # Only if we have enough samples
+        segment_true = validation_true[segment_mask]
+        segment_pred = validation_preds[segment_mask]
+        
+        # Find segment-specific offset
+        segment_offset, segment_offset_improvement = find_optimal_offset(segment_true, segment_pred)
+        
+        # Find segment-specific scaling
+        segment_scale, segment_scale_improvement = find_optimal_scaling(segment_true, segment_pred)
+        
+        # Save the better of the two
+        if segment_offset_improvement > segment_scale_improvement:
+            segment_corrections[segment] = {'method': 'offset', 'value': segment_offset, 'improvement': segment_offset_improvement}
+        else:
+            segment_corrections[segment] = {'method': 'scaling', 'value': segment_scale, 'improvement': segment_scale_improvement}
+            
+        logging.info(f"Segment '{segment}' correction: {segment_corrections[segment]['method']} = {segment_corrections[segment]['value']:.4f} " +
+                    f"(improvement: {segment_corrections[segment]['improvement']:.4f})")
+
 test_weeks = sorted(test_df['week'].unique())
+weeks_predicted = 0
+weekly_correction_stats = []
 
 for week_num in test_weeks:
     logging.info(f"Predicting for week {week_num}...")
@@ -740,13 +942,108 @@ for week_num in test_weeks:
             current_features[col] = 0
     current_features = current_features[FEATURES] # Ensure correct order
 
-    # Predict for the current week
-    current_preds = final_model.predict(current_features)
-    current_preds = np.clip(current_preds, 0, None).round().astype(float) # Use float for potential later calculations
-
-    # Update the 'num_orders' in history_df for the current week with predictions
-    # This ensures the next iteration uses the predicted values to calculate lags/rolling features
-    history_df.loc[current_week_mask, 'num_orders'] = current_preds
+    # Get base predictions from the model
+    base_preds = final_model.predict(current_features)
+    base_preds = np.clip(base_preds, 0, None) # Keep as float for corrections
+    
+    # Get seasonality correction factors for the current week
+    seasonality = get_seasonality_factors(history_df, week_num, weekofyear_means, month_means)
+    
+    # Apply corrections with adaptive approach
+    # Make a copy for corrections
+    corrected_preds = base_preds.copy()
+    
+    # 1. First apply primary correction approach (best one from validation)
+    if primary_correction == "offset":
+        # Add offset with temporal decay
+        correction_factor = correction_value * (0.85 ** weeks_predicted)  # exponential decay
+        corrected_preds += correction_factor
+    else:  # scaling
+        # Scale with minimal decay (scaling is more robust over time)
+        correction_factor = 1.0 + (correction_value - 1.0) * (0.95 ** weeks_predicted)
+        corrected_preds *= correction_factor
+    
+    # 2. Apply segment-specific corrections for better accuracy
+    # Split predictions into segments
+    segment_masks = {
+        'low': base_preds <= low_threshold,
+        'medium': (base_preds > low_threshold) & (base_preds <= high_threshold),
+        'high': base_preds > high_threshold
+    }
+    
+    # Apply segment corrections where helpful
+    for segment, mask in segment_masks.items():
+        if segment in segment_corrections and sum(mask) > 0:
+            correction = segment_corrections[segment]
+            segment_improvement = correction['improvement']
+            
+            # Only apply if improvement is significant
+            if segment_improvement > 0.01:
+                # Create segment-specific correction with decay
+                decay = 0.9 ** weeks_predicted  # Decay segment corrections more slowly
+                
+                if correction['method'] == 'offset':
+                    # Apply offset to just this segment with decay
+                    segment_value = correction['value'] * decay
+                    corrected_preds[mask] += segment_value
+                else:  # scaling
+                    # Apply scaling to just this segment with decay
+                    scale_factor = 1.0 + (correction['value'] - 1.0) * decay
+                    corrected_preds[mask] *= scale_factor
+    
+    # 3. Blend with seasonality for later weeks when we have less confidence
+    if seasonality and weeks_predicted > 0:
+        # As we get further into the future, seasonality becomes more important
+        seasonality_weight = min(0.4, 0.08 * weeks_predicted)  # gradually increase up to 40%
+        
+        # Create a seasonality baseline - prefer similar_week/month actual if available
+        if 'similar_weekofyear_actual' in seasonality and 'similar_month_actual' in seasonality:
+            # We have actual values from similar seasonal periods
+            seasonality_baseline = seasonality['similar_weekofyear_actual'] * 0.6 + seasonality['similar_month_actual'] * 0.4
+        else:
+            # Fall back to global seasonal means
+            seasonality_baseline = seasonality['weekofyear_mean'] * 0.6 + seasonality['month_mean'] * 0.4
+        
+        # Apply the seasonal blend
+        corrected_preds = (1 - seasonality_weight) * corrected_preds + seasonality_weight * seasonality_baseline
+    
+    # 4. Final validation - ensure we're not making predictions worse
+    # Define a simple modification function we can validate
+    def simple_mix(preds):
+        # This creates a safer middle ground between base and corrected predictions
+        return 0.7 * corrected_preds + 0.3 * base_preds
+    
+    # Apply only if corrections are reasonable
+    max_correction_pct = np.max(np.abs((corrected_preds - base_preds) / np.maximum(base_preds, 1)))
+    if max_correction_pct > 0.5:  # If any correction is more than 50%
+        logging.warning(f"Large corrections detected (max {max_correction_pct:.1f}%). Testing a milder correction blend.")
+        corrected_preds = simple_mix(base_preds)
+    
+    # Ensure predictions are non-negative and in the proper format
+    corrected_preds = np.clip(corrected_preds, 0, None).round().astype(float)
+    
+    # Log correction statistics
+    avg_base = np.mean(base_preds)
+    avg_corrected = np.mean(corrected_preds)
+    correction_diff = avg_corrected - avg_base
+    correction_pct = 100 * correction_diff / max(1, avg_base)
+    logging.info(f"Week {week_num} corrections: Base avg={avg_base:.2f}, " +
+                 f"Corrected avg={avg_corrected:.2f}, Diff={correction_diff:.2f} ({correction_pct:.1f}%)")
+    
+    # Save weekly correction stats
+    weekly_correction_stats.append({
+        'week': week_num,
+        'base_mean': avg_base,
+        'corrected_mean': avg_corrected,
+        'abs_correction': np.mean(np.abs(corrected_preds - base_preds)),
+        'rel_correction_pct': correction_pct,
+        'n_samples': len(base_preds)
+    })
+    
+    # Update the 'num_orders' in history_df for the current week with corrected predictions
+    # This ensures the next iteration uses the corrected values for lags/rolling features
+    history_df.loc[current_week_mask, 'num_orders'] = corrected_preds
+    weeks_predicted += 1
 
 logging.info("Recursive prediction finished.")
 
@@ -755,10 +1052,44 @@ final_predictions_df = history_df.loc[history_df['id'].isin(test['id']), ['id', 
 final_predictions_df['num_orders'] = final_predictions_df['num_orders'].round().astype(int) # Final conversion to int
 final_predictions_df['id'] = final_predictions_df['id'].astype(int)
 
+# Save weekly correction statistics
+if weekly_correction_stats:
+    correction_stats_df = pd.DataFrame(weekly_correction_stats)
+    correction_stats_path = f"{SUBMISSION_FILE_PREFIX}_weekly_correction_stats.csv"
+    correction_stats_df.to_csv(correction_stats_path, index=False)
+    logging.info(f"Weekly correction statistics saved to {correction_stats_path}")
+    
+    # Create a plot of weekly corrections
+    try:
+        plt.figure(figsize=(10, 6))
+        plt.plot(correction_stats_df['week'], correction_stats_df['base_mean'], 'b-', label='Base Predictions')
+        plt.plot(correction_stats_df['week'], correction_stats_df['corrected_mean'], 'r-', label='Corrected Predictions')
+        plt.xlabel('Week')
+        plt.ylabel('Mean Predicted Orders')
+        plt.title('Effect of Error Correction by Week')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f"{SUBMISSION_FILE_PREFIX}_weekly_corrections.png")
+        plt.close()
+        
+        # Plot relative correction percentage
+        plt.figure(figsize=(10, 6))
+        plt.bar(correction_stats_df['week'], correction_stats_df['rel_correction_pct'])
+        plt.xlabel('Week')
+        plt.ylabel('Correction (%)')
+        plt.title('Relative Correction Percentage by Week')
+        plt.grid(True)
+        plt.savefig(f"{SUBMISSION_FILE_PREFIX}_correction_percentage.png")
+        plt.close()
+        
+        logging.info("Weekly correction plots saved.")
+    except Exception as e:
+        logging.error(f"Error creating correction plots: {e}")
+
 # --- Create Submission File ---
-submission_path = f"{SUBMISSION_FILE_PREFIX}_optuna.csv"
+submission_path = f"{SUBMISSION_FILE_PREFIX}_ec_optuna.csv"
 final_predictions_df.to_csv(submission_path, index=False)
-logging.info(f"Submission file saved to {submission_path}")
+logging.info(f"Error-corrected submission saved to {submission_path}")
 
 # --- SHAP Analysis ---
 logging.info("Calculating SHAP values...")
