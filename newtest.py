@@ -18,14 +18,22 @@ MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 # SEED = 42
 SEED = random.randint(0, 1000) # Random seed for remote execution
-LAG_WEEKS = [1, 2, 3, 5, 10] # Lags based on num_orders
-ROLLING_WINDOWS = [2, 3, 5, 10, 14, 21] # Added 14 and 21
-# Other features (not directly dependent on recursive prediction)
-OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
-OTHER_ROLLING_SUM_WINDOW = 3
+
+# Feature engineering window configurations - optimized to reduce redundancy while keeping predictive power
+LAG_WEEKS = [1, 2, 4, 8] # Optimized lags based on SHAP importance
+ROLLING_WINDOWS = [2, 5, 14] # Optimized windows for rolling features (short, medium, long-term)
+PROMOTION_COLS = ["emailer_for_promotion", "homepage_featured"] # Promotional feature columns
+PROMOTION_WINDOWS = [3, 8, 14] # Optimized windows for promotional features
+ROLLING_SUM_WINDOWS = [3, 8, 16] # Optimized windows for binary features
+COMBINED_PROMO_WINDOWS = [3, 14] # Reduced windows for combined promotional effects
+EWM_ALPHAS = [0.5] # Single alpha value for exponentially weighted means
+POLYNOMIAL_ROLLING_WINDOWS = [2, 5, 14] # Matching main rolling windows for polynomial features
+POLYNOMIAL_LAG_WINDOWS = [1, 2, 4] # Focus on most important lags for polynomial features
+CUBIC_LAG_WINDOWS = [1, 2] # Only apply cubic to the most important lags
+# Model configuration
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 OPTUNA_TRIALS = 75 # Number of Optuna trials
-OPTUNA_STUDY_NAME = "coolstudy"
+OPTUNA_STUDY_NAME = "woot"
 PG_USER = os.environ.get("POSTGRES_USER", "postgres")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
@@ -33,9 +41,10 @@ PG_DB = os.environ.get("POSTGRES_DB", "optuna")
 PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
 OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-SUBMISSION_FILE_PREFIX = "coolstudy_submission"
-SHAP_FILE_PREFIX = "shap_coolstudy"
+SUBMISSION_FILE_PREFIX = "woot_submission"
+SHAP_FILE_PREFIX = "shap_woot"
 N_SHAP_SAMPLES = 2000
+
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -96,12 +105,11 @@ def create_other_features(df):
     # Price features
     df_out["discount"] = df_out["base_price"] - df_out["checkout_price"]
     df_out["discount_pct"] = df_out["discount"] / df_out["base_price"].replace(0, np.nan) # Avoid division by zero
-    df_out["price_diff"] = group["checkout_price"].diff()
-
-    # Rolling sums for promo/featured (use shift(1))
-    for col in OTHER_ROLLING_SUM_COLS:
+    df_out["price_diff"] = group["checkout_price"].diff()    # Rolling sums for promo/featured (use shift(1))
+    for col in PROMOTION_COLS:
         shifted = group[col].shift(1)
-        df_out[f"{col}_rolling_sum_{OTHER_ROLLING_SUM_WINDOW}"] = shifted.rolling(OTHER_ROLLING_SUM_WINDOW, min_periods=1).sum().reset_index(drop=True)
+        for window in ROLLING_SUM_WINDOWS:
+            df_out[f"{col}_rolling_sum_{window}"] = shifted.rolling(window, min_periods=1).sum().reset_index(drop=True)
 
     # Time features
     df_out["weekofyear"] = df_out["week"] % 52
@@ -159,9 +167,8 @@ def create_advanced_interactions(df):
         df_out['rolling_mean_2_sqrt'] = np.sqrt(df_out['num_orders_rolling_mean_2'].clip(0))
         # Add cubic for the most important feature
         df_out['rolling_mean_2_cubic'] = df_out['num_orders_rolling_mean_2'] ** 3
-    
-    # Extending polynomial features for rolling statistics (important in SHAP)
-    for col in [f'num_orders_rolling_mean_{w}' for w in [3, 5, 8, 10, 12, 14, 19, 21] if f'num_orders_rolling_mean_{w}' in df_out.columns]:
+      # Extending polynomial features for rolling statistics (important in SHAP)
+    for col in [f'num_orders_rolling_mean_{w}' for w in POLYNOMIAL_ROLLING_WINDOWS if f'num_orders_rolling_mean_{w}' in df_out.columns]:
         df_out[f'{col}_sq'] = df_out[col] ** 2
         df_out[f'{col}_sqrt'] = np.sqrt(df_out[col].clip(0))
     
@@ -173,14 +180,13 @@ def create_advanced_interactions(df):
             # Add cubic for the most important features
             if col in ['center_orders_mean', 'meal_orders_mean', 'center_meal_orders_mean_prod']:
                 df_out[f'{col}_cubic'] = df_out[col] ** 3
-    
-    # Add polynomial features for lag variables (highly important in SHAP)
-    for lag in [1, 2, 3, 4, 5, 8, 10]:
+      # Add polynomial features for lag variables (highly important in SHAP)
+    for lag in POLYNOMIAL_LAG_WINDOWS:
         lag_col = f'num_orders_lag_{lag}'
         if lag_col in df_out.columns:
             df_out[f'{lag_col}_sq'] = df_out[lag_col] ** 2
             # Add cubic for the most important lags
-            if lag in [1, 2, 3]:
+            if lag in CUBIC_LAG_WINDOWS:
                 df_out[f'{lag_col}_cubic'] = df_out[lag_col] ** 3
     
     # Ratio features for price-related columns
@@ -229,9 +235,9 @@ def create_interaction_features(df):
         "rolling_mean_2_x_emailer": ("num_orders_rolling_mean_2", "emailer_for_promotion"),
         "rolling_mean_2_x_home": ("num_orders_rolling_mean_2", "homepage_featured"),
         
-        # Additional rolling mean windows with promotions
-        "rolling_mean_3_x_emailer": ("num_orders_rolling_mean_3", "emailer_for_promotion"),
+        # Additional rolling mean windows with promotions (adjusted for new window sizes)
         "rolling_mean_5_x_emailer": ("num_orders_rolling_mean_5", "emailer_for_promotion"),
+        "rolling_mean_14_x_emailer": ("num_orders_rolling_mean_14", "emailer_for_promotion"),
         
         # Meal/center aggregates interactions
         "meal_mean_x_discount": ("meal_orders_mean", "discount"),
@@ -239,17 +245,17 @@ def create_interaction_features(df):
         "discount_pct_x_center_mean": ("discount_pct", "center_orders_mean"),
         "base_price_x_homepage": ("base_price", "homepage_featured"),
         
-        # Lag and rolling interactions (most important according to SHAP)
+        # Lag and rolling interactions (adjusted for new window sizes)
         "lag1_x_rolling_mean_2": ("num_orders_lag_1", "num_orders_rolling_mean_2"),
-        "lag1_x_rolling_mean_3": ("num_orders_lag_1", "num_orders_rolling_mean_3"),
-        "rolling_mean_2_x_rolling_mean_3": ("num_orders_rolling_mean_2", "num_orders_rolling_mean_3"),
+        "lag1_x_rolling_mean_5": ("num_orders_lag_1", "num_orders_rolling_mean_5"),
+        "rolling_mean_2_x_rolling_mean_5": ("num_orders_rolling_mean_2", "num_orders_rolling_mean_5"),
         "lag1_x_lag2": ("num_orders_lag_1", "num_orders_lag_2"),
         
-        # Additional high-value lag interactions from test.py SHAP
-        "lag1_x_lag3": ("num_orders_lag_1", "num_orders_lag_3"),
-        "lag2_x_lag3": ("num_orders_lag_2", "num_orders_lag_3"),
+        # Additional high-value lag interactions (adjusted for new window sizes)
+        "lag1_x_lag4": ("num_orders_lag_1", "num_orders_lag_4"),
+        "lag2_x_lag4": ("num_orders_lag_2", "num_orders_lag_4"),
         "lag2_x_rolling_mean_2": ("num_orders_lag_2", "num_orders_rolling_mean_2"),
-        "lag2_x_rolling_mean_3": ("num_orders_lag_2", "num_orders_rolling_mean_3"),
+        "lag2_x_rolling_mean_5": ("num_orders_lag_2", "num_orders_rolling_mean_5"),
         
         # Seasonality interactions
         "lag1_x_weekofyear_sin": ("num_orders_lag_1", "weekofyear_sin"),
@@ -264,10 +270,10 @@ def create_interaction_features(df):
         "checkout_x_homepage_x_discount": ("checkout_price", "homepage_featured", "discount"),
         "base_price_x_discount_pct": ("base_price", "discount_pct"),
         
-        # Additional triple interactions from test.py SHAP (extremely high value)
+        # Additional triple interactions (adjusted for new window sizes)
         "checkout_x_homepage_x_month_mean": ("checkout_price", "homepage_featured", "mean_orders_by_month"),
         "center_mean_x_meal_mean_x_discount": ("center_orders_mean", "meal_orders_mean", "discount"),
-        "rolling_mean_2_x_rolling_mean_3_x_emailer": ("num_orders_rolling_mean_2", "num_orders_rolling_mean_3", "emailer_for_promotion"),
+        "rolling_mean_2_x_rolling_mean_5_x_emailer": ("num_orders_rolling_mean_2", "num_orders_rolling_mean_5", "emailer_for_promotion"),
     }
     for name, features in interactions.items():
         # Handle both two-feature and three-feature interactions
@@ -318,8 +324,7 @@ def add_seasonality_features(df, weekofyear_means=None, month_means=None, is_tra
     df_out['mean_orders_by_month'] = df_out['month'].map(month_means)
     return df_out
 
-def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage_featured"], 
-                       windows=[2, 3, 5, 7, 14, 21]):
+def add_binary_rolling_means(df, binary_cols=PROMOTION_COLS, windows=PROMOTION_WINDOWS):
     """
     Creates rolling mean features for binary columns like promotions or homepage features.
     This helps capture the effect of recent marketing activities over different time spans.
@@ -337,24 +342,20 @@ def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage
                 df_out[f"{col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
             
             # Add expanded rolling windows for the most important binary features
-            if col in ["emailer_for_promotion", "homepage_featured"]:
-                for window in [8, 10, 13, 19, 20]:  # Additional windows from test.py SHAP
-                    df_out[f"{col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
-            
+            if col in PROMOTION_COLS:
                 # Add cumulative sum of promotions in last N periods
-                for window in [4, 8, 12, 16]:
+                for window in ROLLING_SUM_WINDOWS:
                     df_out[f"{col}_rolling_sum_{window}"] = shifted.rolling(window, min_periods=1).sum().reset_index(drop=True)
-                
-                # Add exponentially weighted means to capture decaying impact of promotions
-                df_out[f"{col}_ewm_alpha_0.3"] = shifted.ewm(alpha=0.3, min_periods=1).mean().reset_index(drop=True)
-                df_out[f"{col}_ewm_alpha_0.7"] = shifted.ewm(alpha=0.7, min_periods=1).mean().reset_index(drop=True)
+                  # Add exponentially weighted means to capture decaying impact of promotions
+                for alpha in EWM_ALPHAS:
+                    df_out[f"{col}_ewm_alpha_{alpha}"] = shifted.ewm(alpha=alpha, min_periods=1).mean().reset_index(drop=True)
                 
                 # Add interaction between promotional features if both exist
                 if "emailer_for_promotion" in df_out.columns and "homepage_featured" in df_out.columns:
                     df_out["emailer_homepage_combined"] = df_out["emailer_for_promotion"] * df_out["homepage_featured"]
                     # Add rolling mean of the combined promotional effect
                     combined_shifted = group["emailer_homepage_combined"].shift(1)
-                    for window in [3, 7, 14]:
+                    for window in COMBINED_PROMO_WINDOWS:
                         df_out[f"emailer_homepage_combined_rolling_mean_{window}"] = combined_shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
     
     return df_out
@@ -430,44 +431,44 @@ FEATURES += [f"{TARGET}_rolling_mean_{w}" for w in ROLLING_WINDOWS if f"{TARGET}
 FEATURES += [f"{TARGET}_rolling_std_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_std_{w}" in train_df.columns]
 
 # Add binary rolling means with expanded windows
-for col in ["emailer_for_promotion", "homepage_featured"]:
-    FEATURES += [f"{col}_rolling_mean_{w}" for w in [2, 3, 5, 7, 8, 10, 13, 14, 19, 20, 21] if f"{col}_rolling_mean_{w}" in train_df.columns]
+for col in PROMOTION_COLS:
+    FEATURES += [f"{col}_rolling_mean_{w}" for w in PROMOTION_WINDOWS if f"{col}_rolling_mean_{w}" in train_df.columns]
 
 # Add promo rolling sums
-FEATURES += [f"{col}_rolling_sum_{w}" for col in OTHER_ROLLING_SUM_COLS for w in [3, 4, 8, 12, 16] if f"{col}_rolling_sum_{w}" in train_df.columns]
+FEATURES += [f"{col}_rolling_sum_{w}" for col in PROMOTION_COLS for w in ROLLING_SUM_WINDOWS if f"{col}_rolling_sum_{w}" in train_df.columns]
 
 # Add EWM features
-for col in ["emailer_for_promotion", "homepage_featured"]:
-    FEATURES += [f"{col}_ewm_alpha_{alpha}" for alpha in ['0.3', '0.7'] if f"{col}_ewm_alpha_{alpha}" in train_df.columns]
+for col in PROMOTION_COLS:
+    FEATURES += [f"{col}_ewm_alpha_{alpha}" for alpha in EWM_ALPHAS if f"{col}_ewm_alpha_{alpha}" in train_df.columns]
 
 # Add combined promotional features
 if "emailer_homepage_combined" in train_df.columns:
     FEATURES.append("emailer_homepage_combined")
-    FEATURES += [f"emailer_homepage_combined_rolling_mean_{w}" for w in [3, 7, 14] if f"emailer_homepage_combined_rolling_mean_{w}" in train_df.columns]
+    FEATURES += [f"emailer_homepage_combined_rolling_mean_{w}" for w in COMBINED_PROMO_WINDOWS if f"emailer_homepage_combined_rolling_mean_{w}" in train_df.columns]
 
 # Add all interaction features
 FEATURES += [col for col in train_df.columns if (
     col.startswith("price_diff_x_") or 
     col.startswith("rolling_mean_") and "_x_" in col or
     col.startswith("lag1_x_") or
-    col.startswith("lag2_x_") or  # Added lag2 interactions
+    col.startswith("lag2_x_") or
     col.startswith("meal_mean_x_") or
     col.startswith("center_mean_x_") or
     col.startswith("seasonal_") or
-    "mean_by_month_x_" in col  # Added month seasonality interactions
-)]
+    "mean_by_month_x_" in col
+) and col in train_df.columns]  # Extra check to ensure column exists
 
 # Add all polynomial features
 FEATURES += [col for col in train_df.columns if (
     col.endswith("_sq") or 
     col.endswith("_sqrt") or
-    col.endswith("_cubic") or  # Added cubic features
-    "poly" in col or  # include all polynomial features, not just target ones
+    col.endswith("_cubic") or
+    "poly" in col or
     "center_orders_mean_poly2" in col or
-    "meal_orders_mean_poly2" in col or  # Added reverse polynomial interaction
+    "meal_orders_mean_poly2" in col or
     "base_price_poly2" in col or
     "homepage_featured_poly2" in col
-)]
+) and col in train_df.columns]  # Extra check to ensure column exists
 
 # Add group-level aggregates
 FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ["center_orders_", "meal_orders_", "category_orders_"])]
@@ -731,7 +732,6 @@ for week_num in test_weeks:
                                           month_means=month_means)
 
     current_features = history_df.loc[current_week_mask, FEATURES]
-
     # Handle potential missing columns in test data after alignment
     missing_cols = [col for col in FEATURES if col not in current_features.columns]
     if missing_cols:
