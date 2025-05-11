@@ -25,7 +25,7 @@ OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 OPTUNA_TRIALS = 75 # Number of Optuna trials
-OPTUNA_STUDY_NAME = "supertest"
+OPTUNA_STUDY_NAME = "newerertest"
 PG_USER = os.environ.get("POSTGRES_USER", "postgres")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
@@ -33,8 +33,8 @@ PG_DB = os.environ.get("POSTGRES_DB", "optuna")
 PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
 OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-SUBMISSION_FILE_PREFIX = "supertest_submission"
-SHAP_FILE_PREFIX = "shap_supertest"
+SUBMISSION_FILE_PREFIX = "newerertest_submission"
+SHAP_FILE_PREFIX = "shap_newerertest"
 N_SHAP_SAMPLES = 2000
 
 # --- Setup Logging ---
@@ -185,12 +185,12 @@ def create_advanced_interactions(df):
         df_out['center_orders_mean_poly2_meal_orders_mean'] = df_out['center_orders_mean'] * (df_out['meal_orders_mean'] ** 2)
     
     # Add centered quadratic features for dates to capture non-linear seasonality
-    # if 'weekofyear' in df_out.columns:
-    #     # Center around middle of year (26) before squaring to reduce correlation
-    #     df_out['weekofyear_centered_sq'] = ((df_out['weekofyear'] - 26) ** 2) / 676  # Normalize by 26^2
-    # if 'month' in df_out.columns:
-    #     # Center around middle of year (6.5) before squaring
-    #     df_out['month_centered_sq'] = ((df_out['month'] - 6.5) ** 2) / 42.25  # Normalize by 6.5^2
+    if 'weekofyear' in df_out.columns:
+        # Center around middle of year (26) before squaring to reduce correlation
+        df_out['weekofyear_centered_sq'] = ((df_out['weekofyear'] - 26) ** 2) / 676  # Normalize by 26^2
+    if 'month' in df_out.columns:
+        # Center around middle of year (6.5) before squaring
+        df_out['month_centered_sq'] = ((df_out['month'] - 6.5) ** 2) / 42.25  # Normalize by 6.5^2
         
     return df_out
 
@@ -365,7 +365,7 @@ FEATURES = [
     "mean_orders_by_weekofyear", "mean_orders_by_month",
     
     # Centered quadratic temporal features
-    # "weekofyear_centered_sq", "month_centered_sq",
+    "weekofyear_centered_sq", "month_centered_sq",
     
     # Price-derived features
     "price_ratio"
