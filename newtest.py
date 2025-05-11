@@ -25,7 +25,7 @@ OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 OPTUNA_TRIALS = 75 # Number of Optuna trials
-OPTUNA_STUDY_NAME = "newerertest"
+OPTUNA_STUDY_NAME = "experiment_1"
 PG_USER = os.environ.get("POSTGRES_USER", "postgres")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
@@ -33,8 +33,8 @@ PG_DB = os.environ.get("POSTGRES_DB", "optuna")
 PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
 OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-SUBMISSION_FILE_PREFIX = "newerertest_submission"
-SHAP_FILE_PREFIX = "shap_newerertest"
+SUBMISSION_FILE_PREFIX = "experiment_1_submission"
+SHAP_FILE_PREFIX = "shap_experiment_1"
 N_SHAP_SAMPLES = 2000
 
 # --- Setup Logging ---
@@ -95,7 +95,7 @@ def create_other_features(df):
 
     # Price features
     df_out["discount"] = df_out["base_price"] - df_out["checkout_price"]
-    df_out["discount_pct"] = df_out["discount"] / df_out["base_price"].replace(0, np.nan) # Avoid division by zero
+    df_out["discount_pct"] = df_out["discount"] / df_out["base_price"].replace(0, 1e-308) # Avoid division by zero
     df_out["price_diff"] = group["checkout_price"].diff()
 
     # Rolling sums for promo/featured (use shift(1))
@@ -127,8 +127,9 @@ def create_group_aggregates(df):
     # High-value cross aggregates (based on SHAP importance from test.py)
     df_out['center_meal_orders_mean_prod'] = df_out['center_orders_mean'] * df_out['meal_orders_mean']
     df_out['center_meal_orders_median_prod'] = df_out['center_orders_median'] * df_out['meal_orders_median']
-    df_out['center_meal_orders_mean_div'] = df_out['center_orders_mean'] / df_out['meal_orders_mean'].replace(0, 1)
-    
+    df_out['center_meal_orders_mean_div'] = df_out['center_orders_mean'] / df_out['meal_orders_mean'].replace(0, 1e-308)
+    # TODO - Test if this is useful
+    # df_out['center_meal_orders_median_div'] = df_out['center_orders_median'] / df_out['meal_orders_median'].replace(0, 1e-308)
     return df_out
 
 def cyclical_encode(df, col, max_val):
@@ -166,8 +167,8 @@ def create_advanced_interactions(df):
     
     # Ratio features for price-related columns
     if all(c in df_out.columns for c in ['checkout_price', 'base_price']):
-        df_out['price_ratio'] = df_out['checkout_price'] / df_out['base_price'].replace(0, np.nan)
-        
+        df_out['price_ratio'] = df_out['checkout_price'] / df_out['base_price'].replace(0, 1e-308)
+
     # Price discount polynomial interactions (from test.py SHAP)
     if all(c in df_out.columns for c in ['base_price', 'discount_pct']):
         df_out['base_price_poly2_discount_pct'] = df_out['base_price'] * (df_out['discount_pct'] ** 2)
@@ -545,13 +546,13 @@ def objective(trial):
     params = {
         'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.05, log=True),
         'num_leaves': trial.suggest_int('num_leaves', 4, 512),
-        'max_depth': trial.suggest_int('max_depth', 2, 30),
+        'max_depth': trial.suggest_int('max_depth', 2, 15),
         'feature_fraction': trial.suggest_float('feature_fraction', 0.2, 1.0),
         'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
-        'bagging_freq': trial.suggest_int('bagging_freq', 0, 10),
+        'bagging_freq': trial.suggest_int('bagging_freq', 1, 10),
         'min_child_samples': trial.suggest_int('min_child_samples', 10, 2000),
-        'lambda_l1': trial.suggest_float('lambda_l1', 1e-8, 1000.0, log=True),
-        'lambda_l2': trial.suggest_float('lambda_l2', 1e-8, 1000.0, log=True),
+        'lambda_l1': trial.suggest_float('lambda_l1', 1e-4, 1000.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1e-4, 1000.0, log=True),
     }
     # Add fixed params
     params.update({
