@@ -25,7 +25,7 @@ OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 OPTUNA_TRIALS = 75 # Number of Optuna trials
-OPTUNA_STUDY_NAME = "experiment_1"
+OPTUNA_STUDY_NAME = "experiment_2"
 PG_USER = os.environ.get("POSTGRES_USER", "postgres")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
@@ -33,8 +33,8 @@ PG_DB = os.environ.get("POSTGRES_DB", "optuna")
 PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
 OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-SUBMISSION_FILE_PREFIX = "experiment_1_submission"
-SHAP_FILE_PREFIX = "shap_experiment_1"
+SUBMISSION_FILE_PREFIX = "experiment_2_submission"
+SHAP_FILE_PREFIX = "shap_experiment_2"
 N_SHAP_SAMPLES = 2000
 
 # --- Setup Logging ---
@@ -546,13 +546,13 @@ def objective(trial):
     params = {
         'learning_rate': trial.suggest_float('learning_rate', 0.001, 0.05, log=True),
         'num_leaves': trial.suggest_int('num_leaves', 4, 512),
-        'max_depth': trial.suggest_int('max_depth', 2, 15),
-        'feature_fraction': trial.suggest_float('feature_fraction', 0.2, 1.0),
-        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 1.0),
-        'bagging_freq': trial.suggest_int('bagging_freq', 1, 10),
+        'max_depth': trial.suggest_int('max_depth', 2, 10),
+        'feature_fraction': trial.suggest_float('feature_fraction', 0.2, 0.9),
+        'bagging_fraction': trial.suggest_float('bagging_fraction', 0.5, 0.9),
+        'bagging_freq': trial.suggest_int('bagging_freq', 2, 10),
         'min_child_samples': trial.suggest_int('min_child_samples', 10, 2000),
-        'lambda_l1': trial.suggest_float('lambda_l1', 1e-4, 1000.0, log=True),
-        'lambda_l2': trial.suggest_float('lambda_l2', 1e-4, 1000.0, log=True),
+        'lambda_l1': trial.suggest_float('lambda_l1', 1, 1000.0, log=True),
+        'lambda_l2': trial.suggest_float('lambda_l2', 1, 1000.0, log=True),
     }
     # Add fixed params
     params.update({
