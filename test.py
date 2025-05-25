@@ -40,45 +40,34 @@ SEED = random.randint(0, 1000000) # Random seed distributed for each run
 MAX_INTERACTION_ORDER = 4 # Max order of interactions to consider (2nd order = pairwise, 3rd order = triplet, etc.)
 MAX_INTERACTIONS_PER_ORDER = {2: 18, 3: 4, 4: 1, 5: 0}
 LAG_WINDOWS = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14]
-ROLLING_WINDOWS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 28, 35, 42, 49, 52]
+ROLLING_WINDOWS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 28, 35, 42, 49, 52]
 OPTUNA_MULTI_OBJECTIVE = True  # Set to True for multi-objective (mean_valid, gap_penalty, etc.)
 OBJECTIVE_WEIGHT_MEAN_VALID = 1.0
-OBJECTIVE_WEIGHT_GAP_PENALTY = 0.5
+OBJECTIVE_WEIGHT_GAP_PENALTY = 0.2
 OBJECTIVE_WEIGHT_COMPLEXITY_PENALTY = 0.0001
 OBJECTIVE_WEIGHT_REG_REWARD = 0.001
 N_ENSEMBLE_MODELS = 5
 OVERFIT_ROUNDS = 17 # Overfitting detection rounds
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
 N_WARMUP_STEPS = 200 # Warmup steps for Optuna pruning
-POPULATION_SIZE = 50 # Population size for Genetic algorithm
+POPULATION_SIZE = 5 # Population size for Genetic algorithm
 # OPTUNA_SAMPLER = "Default"
 # OPTUNA_SAMPLER = "NSGAIISampler"
 OPTUNA_SAMPLER = "NSGAIIISampler"
 PRUNING_ENABLED = False # Enable pruning for Optuna trials
-OPTUNA_TRIALS = 1000000 # Number of Optuna trials (increased for better search)
+OPTUNA_TRIALS = 1 # Number of Optuna trials (increased for better search)
 OPTUNA_TIMEOUT = 60 * 60 * 24 # Timeout for Optuna trials (in seconds)
 RERUN_TOP_N = 0 # Number of top trials to rerun for final model training
 RERUN_OPTUNA_STUDY_NAME = "recursive_lgbm_tuning" # Study name for rerun
 
 OPTUNA_STUDY_NAME = "multi_objective_lgbm_tuning"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-# OPTUNA_DB = "postgresql://neondb_owner:npg_b9Jo7RhUgpSd@ep-proud-dust-a4fztafy-pooler.us-east-1.aws.neon.tech/neondb?sslmode=require"
-
-def get_username():
-    try:
-        if platform.system() == "Windows":
-            return subprocess.check_output("whoami", shell=True).decode().strip().lower()
-        else:
-            return os.environ.get("USER", "").lower()
-    except Exception:
-        return ""
 
 # Get PostgreSQL credentials from environment variables or use defaults
 PG_USER = os.environ.get("POSTGRES_USER", "postgres")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
 PG_DB = os.environ.get("POSTGRES_DB", "optuna")
-
 PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
 OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
@@ -778,14 +767,14 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     # Store selected features and objective value for callback/plotting
     trial.set_user_attr('n_features', float(len(selected_features)))
     if (is_multi_objective):
-        objective_val = mean_valid + gap_penalty
+        objective_val = valid_reward + gap_penalty
     else:
-        objective_val = mean_valid
+        objective_val = valid_reward
     trial.set_user_attr('objective', objective_val)
 
-    # Multi-objective: minimize mean_valid, gap_penalty, complexity_penalty, maximize reg_reward (so minimize -reg_reward)
+    # Multi-objective: minimize valid_reward, gap_penalty, complexity_penalty, maximize reg_reward (so minimize -reg_reward)
     # If any objective is nan/inf, prune
-    objectives = [mean_valid, gap_penalty]
+    objectives = [valid_reward, gap_penalty]
     if any(np.isnan(obj) or np.isinf(obj) for obj in objectives):
         logging.warning(f"Optuna trial {trial.number} produced invalid objectives: {objectives}.")
         raise optuna.TrialPruned()
@@ -793,7 +782,7 @@ def optuna_feature_selection_and_hyperparam_objective(trial, train_split_df=trai
     if (is_multi_objective):
         return objectives
     else:
-        return mean_valid
+        return objective_val
 
 logging.info("Starting Optuna feature+hyperparam selection...")
 
@@ -1065,6 +1054,7 @@ elif OPTUNA_SAMPLER == "NSGAIIISampler":
 else:
     sampler = optuna.samplers.TPESampler(
         seed=SEED,
+        constant_liar=True, # Use constant liar to improve convergence speed (it penalizes running trials to avoid suggesting parameter configurations nearby)
     )
     # For single-objective, you can use any of the objectives, e.g. mean_valid
     if PRUNING_ENABLED:
@@ -1299,13 +1289,13 @@ else:
             SELECTED_FEATURES.append(f)
     # Extract LightGBM params and noise parameters
     raw_params = {k: v for k, v in best_trial.params.items() if k not in FEATURES and not k.endswith('_pair') and not k.startswith('inter_')}
+    logging.info(f"Optuna-selected params: {raw_params}")
+    logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
     # Tuned noise parameters
     tuned_noise_target_level = raw_params.pop('noise_target_level', 0.0)
     tuned_noise_feature_level = raw_params.pop('noise_feature_level', 0.0)
     tuned_bootstrap_frac = raw_params.pop('bootstrap_frac', 0.0)
     best_params = raw_params
-    logging.info(f"Optuna-selected params: {best_params}")
-    logging.info(f"Optuna-selected features: ({len(SELECTED_FEATURES)}): {SELECTED_FEATURES}")
     if best_params.get('boosting_type') == 'goss':
         best_params['bagging_fraction'] = 1.0
         best_params['bagging_freq'] = 0

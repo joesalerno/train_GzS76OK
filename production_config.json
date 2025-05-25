@@ -1,0 +1,57 @@
+{
+  "data_paths": {
+    "train": "train.csv",
+    "test": "test.csv",
+    "meal_info": "meal_info.csv",
+    "center_info": "fulfilment_center_info.csv"
+  },
+  "model_settings": {
+    "validation_weeks": 8,
+    "ensemble_models": ["lgb", "xgb", "cat"],
+    "feature_selection_threshold": 0.001,
+    "max_features": 200,
+    "cv_folds": 5,
+    "optuna_trials": 50,
+    "early_stopping_rounds": 100
+  },
+  "feature_engineering": {
+    "lag_weeks": [1, 2, 3, 5, 10],
+    "rolling_windows": [2, 3, 5, 10, 14, 21],
+    "fourier_terms": 4,
+    "clustering_k": 50,
+    "target_encoding_smoothing": 10
+  },
+  "production_settings": {
+    "performance_threshold_rmsle": 0.75,
+    "drift_detection_threshold": 0.1,
+    "fallback_enabled": true,
+    "monitoring_enabled": true,
+    "auto_retrain_enabled": true,
+    "max_prediction_deviation": 3.0,
+    "alert_email_enabled": false
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "production_forecasting.log",
+    "max_size_mb": 100,
+    "backup_count": 5,
+    "console_output": true
+  },
+  "outputs": {
+    "predictions_dir": "predictions",
+    "models_dir": "models",
+    "reports_dir": "reports",
+    "monitoring_dir": "monitoring",
+    "visualizations_dir": "visualizations"
+  },
+  "performance_targets": {
+    "target_rmsle": 0.65,
+    "acceptable_rmsle": 0.75,
+    "minimum_improvement": 0.02
+  },
+  "resource_limits": {
+    "max_memory_gb": 8,
+    "max_training_time_hours": 2,
+    "max_features_per_model": 150
+  }
+}

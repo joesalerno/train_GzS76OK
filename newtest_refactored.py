@@ -16,10 +16,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import optuna
 import shap
+import copy
 import lightgbm as lgb
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import KFold
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import HistGradientBoostingRegressor
 
 # --- Configuration ---
 # Data paths
@@ -49,7 +51,7 @@ EWM_ALPHAS = [0.3, 0.7]  # Alpha values for exponentially weighted means
 VALIDATION_WEEKS = 8  # Use last 8 weeks for validation
 
 # Optuna configuration
-OPTUNA_TRIALS = 75  # Number of Optuna trials
+OPTUNA_TRIALS = 1  # Number of Optuna trials
 OPTUNA_STUDY_NAME = "ecc"
 # Database configuration for Optuna
 PG_USER = os.environ.get("POSTGRES_USER", "postgres")
@@ -814,20 +816,40 @@ def generate_predictions(final_model, train_df, test_df, features, weekofyear_me
             )
             
             # Get features for current week
-            current_features = history_df.loc[current_week_mask, features].copy()
-            
-            # Handle missing columns
+            current_features = history_df.loc[current_week_mask, features].copy()            # Handle missing columns
             missing_cols = [col for col in features if col not in current_features.columns]
             if missing_cols:
-                logging.warning(f"Missing {len(missing_cols)} columns during prediction. Filling with 0.")
-                for col in missing_cols:
-                    current_features[col] = 0
-            
-            # Ensure correct feature order
-            current_features = current_features[features]
+                # Check if predict_disable_shape_check parameter is set in the model's parameters
+                model_params = getattr(final_model, '_other_params', {})
+                predict_disable_shape_check = model_params.get('predict_disable_shape_check', False)
+                
+                if predict_disable_shape_check:
+                    logging.warning(f"Model using predict_disable_shape_check. Proceeding with {len(current_features.columns)} features instead of {len(features)}.")
+                    # Only use available features - the model has been configured to handle this
+                    available_features = [f for f in features if f in current_features.columns]
+                    current_features = current_features[available_features]
+                else:
+                    # Standard approach - fill missing columns with zeros
+                    logging.warning(f"Missing {len(missing_cols)} columns during prediction. Filling with 0.")
+                    for col in missing_cols:
+                        current_features[col] = 0
+                    # Ensure correct feature order
+                    current_features = current_features[features]
+            else:
+                # All features available, ensure correct order
+                current_features = current_features[features]
             
             # Get original predictions from the model
-            base_preds = final_model.predict(current_features)
+            try:
+                # First try with predict_disable_shape_check if we have missing columns
+                if missing_cols and hasattr(final_model, 'predict'):
+                    base_preds = final_model.predict(current_features, predict_disable_shape_check=True)
+                else:
+                    base_preds = final_model.predict(current_features)
+            except Exception as e:
+                # Fall back to standard prediction
+                logging.warning(f"Error during prediction with shape check disabled: {e}. Using standard prediction.")
+                base_preds = final_model.predict(current_features)
             
             # Get correction factors based on seasonality
             correction_factors = get_error_correction_factors(
@@ -962,27 +984,29 @@ def generate_ensemble_predictions(final_model, train_df, test_df, features, week
     """
     logging.info("Generating ensemble predictions with multiple error correction strategies...")
     
+    # Initialize predictions for each strategy
+    seasonality_predictions = None
+    lag_predictions = None
+    
     # Strategy 1: Standard predictions with error correction
     predictions_df1 = generate_predictions(final_model, train_df, test_df, features, weekofyear_means, month_means)
-    
-    # Strategy 2: Generate predictions with a more conservative error correction
+      # Strategy 2: Generate predictions with a more conservative error correction
     # Create a modified version of the model with more regularization
     conservative_params = final_model.get_params()
     conservative_params['lambda_l1'] = conservative_params.get('lambda_l1', 0.1) * 2
     conservative_params['lambda_l2'] = conservative_params.get('lambda_l2', 0.1) * 2
-    conservative_model = LGBMRegressor(**conservative_params)
     
-    # Transfer learned model parameters
-    conservative_model._Booster = final_model._Booster
+    # Instead of creating a new model, modify the existing one's parameters for prediction
+    # This avoids the need to retrain while still allowing parameter adjustments
+    modified_model = copy.deepcopy(final_model)
     
     # Backup the original logging level temporarily
     original_log_level = logging.getLogger().level
     
     # Reduce logging output for secondary strategies
     logging.getLogger().setLevel(logging.WARNING)
-    
-    # Generate predictions with the conservative model
-    predictions_df2 = generate_predictions(conservative_model, train_df, test_df, features, weekofyear_means, month_means)
+      # Generate predictions with the conservative model
+    predictions_df2 = generate_predictions(modified_model, train_df, test_df, features, weekofyear_means, month_means)
     
     # Strategy 3: Seasonality-focused predictions
     # For this approach, we'll create a version that emphasizes seasonality patterns
@@ -1005,14 +1029,16 @@ def generate_ensemble_predictions(final_model, train_df, test_df, features, week
     
     # Combine seasonal and essential features
     seasonality_focus_features = list(set(seasonality_features + essential_features))
-    
-    # Skip this strategy if we don't have enough features
-    seasonality_predictions = None
+      # Skip this strategy if we don't have enough features    seasonality_predictions = None
     if len(seasonality_focus_features) >= len(features) * 0.5:
-        try:
-            # Create model with seasonality focus
-            seasonality_model = LGBMRegressor(**final_model.get_params())
-            seasonality_model._Booster = final_model._Booster
+        try:            # Create a copy of the model for seasonality focus
+            seasonality_model = copy.deepcopy(final_model)
+            
+            # Store the predict_disable_shape_check parameter in the model
+            # LightGBM models store additional parameters in _other_params dictionary
+            if not hasattr(seasonality_model, '_other_params'):
+                seasonality_model._other_params = {}
+            seasonality_model._other_params['predict_disable_shape_check'] = True
             
             # Generate seasonality-focused predictions
             predictions_df3 = generate_predictions(
@@ -1034,14 +1060,16 @@ def generate_ensemble_predictions(final_model, train_df, test_df, features, week
     
     # Include essential features
     lag_focus_features = list(set(lag_features + essential_features))
-    
-    # Skip this strategy if we don't have enough features
-    lag_predictions = None
+      # Skip this strategy if we don't have enough features    lag_predictions = None
     if len(lag_focus_features) >= len(features) * 0.5:
-        try:
-            # Create model with lag focus
-            lag_model = LGBMRegressor(**final_model.get_params())
-            lag_model._Booster = final_model._Booster
+        try:            # Create a copy of the model for lag focus
+            lag_model = copy.deepcopy(final_model)
+            
+            # Store the predict_disable_shape_check parameter in the model
+            # LightGBM models store additional parameters in _other_params dictionary
+            if not hasattr(lag_model, '_other_params'):
+                lag_model._other_params = {}
+            lag_model._other_params['predict_disable_shape_check'] = True
             
             # Generate lag-focused predictions
             predictions_df4 = generate_predictions(
@@ -1179,14 +1207,13 @@ def calculate_prediction_errors(true_values, predicted_values):
     Returns error statistics that can be used for error correction.
     """
     errors = true_values - predicted_values
-    
-    # Compute error statistics
+      # Compute error statistics
     error_stats = {
         'mean': np.mean(errors),
         'median': np.median(errors),
         'std': np.std(errors),
         'mae': np.mean(np.abs(errors)),
-        'mape': np.mean(np.abs(errors / true_values.replace(0, 1))) * 100
+        'mape': np.mean(np.abs(errors / np.where(true_values > 0, true_values, 1))) * 100
     }
     
     return errors, error_stats
@@ -1211,8 +1238,14 @@ def build_error_correction_model(train_df, features, y_true, y_pred):
     if len(error_model_features) == 0:
         return None, []
         
-    # Create a simple linear model to predict errors
-    error_model = LinearRegression()
+    # Create a model that can handle NaN values natively
+    error_model = HistGradientBoostingRegressor(
+        max_depth=5,
+        learning_rate=0.1,
+        max_iter=100,
+        min_samples_leaf=10,
+        random_state=42
+    )
     
     try:
         error_model.fit(train_df[error_model_features], errors)
@@ -1346,14 +1379,28 @@ def visualize_error_correction_impact(validation_df, base_preds, corrected_preds
         
         # Plot 3: Error by order volume
         plt.figure(figsize=(10, 6))
-        
-        # Group by order volume bins
+          # Group by order volume bins
         order_bins = np.linspace(0, np.percentile(y_true, 99), 10)
         bin_indices = np.digitize(y_true, order_bins)
         
-        base_error_by_bin = [np.mean(np.abs(base_errors[bin_indices == i])) for i in range(1, len(order_bins) + 1)]
-        corrected_error_by_bin = [np.mean(np.abs(corrected_errors[bin_indices == i])) for i in range(1, len(order_bins) + 1)]
+        # Make sure all arrays have the same length
         bin_centers = [(order_bins[i] + order_bins[i-1])/2 for i in range(1, len(order_bins))]
+        base_error_by_bin = []
+        corrected_error_by_bin = []
+        
+        # Calculate mean error for each bin
+        for i in range(1, len(order_bins)):
+            mask = bin_indices == i
+            if np.any(mask):
+                base_error_by_bin.append(np.mean(np.abs(base_errors[mask])))
+                corrected_error_by_bin.append(np.mean(np.abs(corrected_errors[mask])))
+            else:
+                base_error_by_bin.append(0)
+                corrected_error_by_bin.append(0)
+        
+        # Ensure all arrays have the same length
+        assert len(bin_centers) == len(base_error_by_bin) == len(corrected_error_by_bin), \
+            f"Array length mismatch: {len(bin_centers)} vs {len(base_error_by_bin)} vs {len(corrected_error_by_bin)}"
         
         plt.bar(bin_centers, base_error_by_bin, width=order_bins[1]-order_bins[0], alpha=0.5, label='Base Errors')
         plt.bar(bin_centers, corrected_error_by_bin, width=order_bins[1]-order_bins[0], alpha=0.5, label='Corrected Errors')

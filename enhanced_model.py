@@ -20,8 +20,8 @@ MEAL_INFO_PATH = "meal_info.csv"
 CENTER_INFO_PATH = "fulfilment_center_info.csv"
 LAG_WEEKS = [1, 2, 3, 5, 10]
 ROLLING_WINDOWS = [3, 5, 14, 21]
-VALIDATION_WEEKS = 8
-OPTUNA_TRIALS = 25  # Reduced for faster execution, increase for better results
+VALIDATION_WEEKS = 10
+OPTUNA_TRIALS = 40  # Reduced for faster execution, increase for better results
 OPTUNA_STUDY_NAME = "enhanced_optimized"
 SUBMISSION_FILE_PREFIX = "enhanced_model"
 SEED = 42
@@ -278,25 +278,28 @@ def run_enhanced_model():
     best_sample_rate = best_params.pop('feature_sample_rate', 1.0)
     n_features = int(len(feature_cols) * best_sample_rate)
     
-    if n_features < len(feature_cols):
-        # Get feature importances across trials
-        feature_imp_dict = {}
-        for trial in study.trials:
-            if 'feature_importance' in trial.user_attrs:
-                for feat, imp in trial.user_attrs['feature_importance'].items():
-                    if feat not in feature_imp_dict:
-                        feature_imp_dict[feat] = []
-                    feature_imp_dict[feat].append(imp)
+    # if n_features < len(feature_cols):
+    #     # Get feature importances across trials
+    #     feature_imp_dict = {}
+    #     for trial in study.trials:
+    #         if 'feature_importance' in trial.user_attrs:
+    #             for feat, imp in trial.user_attrs['feature_importance'].items():
+    #                 if feat not in feature_imp_dict:
+    #                     feature_imp_dict[feat] = []
+    #                 feature_imp_dict[feat].append(imp)
         
-        # Calculate average importance
-        avg_importances = {feat: np.mean(imps) for feat, imps in feature_imp_dict.items() if len(imps) > 0}
-        # Sort features by importance
-        sorted_features = sorted(avg_importances.items(), key=lambda x: x[1], reverse=True)
-        # Select top features
-        selected_features = [f[0] for f in sorted_features[:n_features]]
-        logging.info(f"Selected {len(selected_features)} features based on importance")
-    else:
-        selected_features = feature_cols
+    #     # Calculate average importance
+    #     avg_importances = {feat: np.mean(imps) for feat, imps in feature_imp_dict.items() if len(imps) > 0}
+    #     # Sort features by importance
+    #     sorted_features = sorted(avg_importances.items(), key=lambda x: x[1], reverse=True)
+    #     # Select top features
+    #     selected_features = [f[0] for f in sorted_features[:n_features]]
+    #     logging.info(f"Selected {len(selected_features)} features based on importance")
+    # else:
+    #     selected_features = feature_cols
+
+    selected_features = feature_cols
+        
       # Train final model
     final_model = lgb.LGBMRegressor(**best_params, seed=SEED)
     final_model.fit(

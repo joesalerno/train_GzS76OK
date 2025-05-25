@@ -1,0 +1,42 @@
+ENHANCED FORECASTING SYSTEM - TEST REPORT
+============================================================
+Test Date: 2025-05-24 17:37:18
+Total Tests: 8
+
+TEST SUMMARY:
+✓ Passed: 6
+✗ Failed: 2
+⚠ Errors: 0
+Success Rate: 75.0%
+
+DETAILED RESULTS:
+----------------------------------------
+✓ test_data_loading (0.31s)
+
+✗ test_feature_engineering (1.07s)
+   Error: Unknown error
+
+✗ test_model_training (0.28s)
+   Error: Unknown error
+
+✓ test_prediction_generation (0.02s)
+
+✓ test_evaluation_system (0.49s)
+
+✓ test_production_integration (0.46s)
+
+✓ test_error_handling (0.44s)
+
+✓ test_performance_benchmarks (0.31s)
+
+PERFORMANCE BENCHMARKS:
+------------------------------
+initial_memory_mb: 251.48046875
+after_load_memory_mb: 283.7265625
+memory_increase_mb: 32.24609375
+feature_engineering_time_s: 0.10033202171325684
+data_rows_processed: 456548
+
+RECOMMENDATIONS:
+--------------------
+⚠ Address failing tests before production deployment

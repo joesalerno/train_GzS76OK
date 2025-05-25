@@ -1,0 +1,8 @@
+Metric,Value
+Overall Mean Absolute Difference,34.91 orders
+Overall Mean Relative Difference,16.47%
+Correlation between Predictions,0.9639
+Original Model Average Prediction,235.29
+Enhanced Model Average Prediction,231.06
+Original Model Prediction Std,364.52
+Enhanced Model Prediction Std,321.05

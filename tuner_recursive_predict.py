@@ -63,8 +63,18 @@ RERUN_TOP_N = 0
 RERUN_OPTUNA_STUDY_NAME = "recursive_lgbm_tuning"
 # Storage & naming
 OPTUNA_STUDY_NAME = "multi_objective_lgbm_tuning"
-OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-# OPTUNA_DB = "postgresql://postgres:optuna@34.55.13.135:5432/optuna"
+
+# Use SQLite by default, but allow overriding with PostgreSQL via environment variables
+if os.environ.get("USE_POSTGRESQL", "0").lower() in ("1", "true", "yes"):
+    # Get PostgreSQL credentials from environment variables or use defaults
+    PG_USER = os.environ.get("POSTGRES_USER", "postgres")
+    PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "optuna")
+    PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
+    PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
+    PG_DB = os.environ.get("POSTGRES_DB", "optuna")
+    OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
+else:
+    OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
 SUBMISSION_FILE_PREFIX = "submission_recursive"
 SHAP_FILE_PREFIX = "shap_recursive"
 N_SHAP_SAMPLES = 2000

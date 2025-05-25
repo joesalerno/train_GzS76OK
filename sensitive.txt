@@ -1,0 +1,5 @@
+joesaleron.duckdns.org
+postgresql://postgres:postgres@localhost:5432/optuna
+postgresql://postgres:postgres@joesalerno.duckdns.org:5432/optuna
+postgresql://optuna:optuna@localhost:5432/optuna
+postgresql://optuna:optuna@joesalerno.duckdns.org:5432/optuna

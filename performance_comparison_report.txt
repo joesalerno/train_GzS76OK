@@ -1,0 +1,37 @@
+ENHANCED FORECASTING SYSTEM - PERFORMANCE COMPARISON
+============================================================
+
+BASELINE APPROACH RESULTS:
+  RMSLE: 0.16939
+  RMSE:  41.65
+  MAE:   18.72
+  Features: 16
+  Training Time: 1.39s
+
+ENHANCED APPROACH RESULTS:
+  RMSLE: 0.35908
+  RMSE:  67.02
+  MAE:   40.49
+  Features: 53
+  Training Time: 15.55s
+
+IMPROVEMENTS:
+  RMSLE Improvement: -111.98%
+  RMSE Improvement:  -60.91%
+  MAE Improvement:   -116.24%
+  Feature Count:     +37
+
+ANALYSIS:
+⚠️  Enhanced system shows 112.0% degradation in RMSLE
+📊 Enhanced system uses 37 additional features
+
+FEATURE ENGINEERING IMPACT:
+  Advanced features created: 38 (beyond basic data)
+  Feature engineering efficiency: 3.4 features/second
+
+RECOMMENDATIONS:
+  - Enhanced system provides more sophisticated modeling capability
+  - Consider trade-offs between accuracy and complexity
+  - Monitor feature importance to optimize feature set
+
+Report generated: 2025-05-24 17:42:41.075021
