@@ -25,16 +25,16 @@ CENTER_INFO_PATH = "fulfilment_center_info.csv"
 # SEED = 42
 SEED = random.randint(0, 1000) # Random seed for reproducibility
 LAG_WEEKS = [1, 2, 3, 5, 10] # Lags based on num_orders
-ROLLING_WINDOWS = [2, 3, 5, 10, 14, 21] # Added 14 and 21
-# Advanced lag features with exponential decay weights
-EXP_DECAY_LAGS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12] # More granular lags
+ROLLING_WINDOWS = [2, 3, 5, 10, 14] # Remove 21 - low SHAP importance
+# Advanced lag features with exponential decay weights - focus on most important
+EXP_DECAY_LAGS = [1, 2, 3, 4, 5, 6, 7, 8] # Remove 10, 12 - diminishing returns
 DECAY_FACTOR = 0.85 # Exponential decay factor for weighted features
 # Other features (not directly dependent on recursive prediction)
 OTHER_ROLLING_SUM_COLS = ["emailer_for_promotion", "homepage_featured"]
 OTHER_ROLLING_SUM_WINDOW = 3
 VALIDATION_WEEKS = 8 # Use last 8 weeks for validation
-OPTUNA_TRIALS = 1 # Number of Optuna trials
-OPTUNA_STUDY_NAME = "experimental"
+OPTUNA_TRIALS = 2 # Number of Optuna trials
+OPTUNA_STUDY_NAME = "experimental4"
 PG_USER = os.environ.get("POSTGRES_USER", "postgres")
 PG_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
 PG_PORT = os.environ.get("POSTGRES_PORT", "5432")
@@ -42,8 +42,8 @@ PG_DB = os.environ.get("POSTGRES_DB", "optuna")
 PG_HOST = os.environ.get("POSTGRES_HOST", "you_must_enter_a_postgres_host")
 OPTUNA_DB = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 # OPTUNA_DB = f"sqlite:///optuna_study_{OPTUNA_STUDY_NAME}.db"
-SUBMISSION_FILE_PREFIX = "experimental_submission"
-SHAP_FILE_PREFIX = "shap_experimental"
+SUBMISSION_FILE_PREFIX = "experimental4_submission"
+SHAP_FILE_PREFIX = "shap_experimental4"
 N_SHAP_SAMPLES = 2000
 # Advanced modeling configuration
 ENSEMBLE_MODELS = 5  # Number of models in ensemble
@@ -114,17 +114,21 @@ def create_lag_rolling_features(df, target_col='num_orders', lag_weeks=LAG_WEEKS
     shifted = group[target_col].shift(1)
     for window in rolling_windows:
         df_out[f"{target_col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
-        df_out[f"{target_col}_rolling_std_{window}"] = shifted.rolling(window, min_periods=1).std().reset_index(drop=True)
         
-        # Advanced rolling statistics
-        df_out[f"{target_col}_rolling_median_{window}"] = shifted.rolling(window, min_periods=1).median().reset_index(drop=True)
+        # Only calculate std for most important windows based on SHAP
+        if window in [2, 3, 5, 10]:  # Remove std for 14+ windows - low importance
+            df_out[f"{target_col}_rolling_std_{window}"] = shifted.rolling(window, min_periods=1).std().reset_index(drop=True)
         
-        # Only calculate skew for windows >= 3 (skew needs at least 3 points)
-        if window >= 3:
+        # Advanced rolling statistics - focus on most valuable ones
+        if window in [5, 10, 14]:  # Keep only high-impact median windows
+            df_out[f"{target_col}_rolling_median_{window}"] = shifted.rolling(window, min_periods=1).median().reset_index(drop=True)
+        
+        # Only calculate skew for select windows - most are low importance
+        if window in [5, 10]:  # Remove skew for other windows - minimal SHAP value
             df_out[f"{target_col}_rolling_skew_{window}"] = shifted.rolling(window, min_periods=min(3, window)).skew().reset_index(drop=True)
         
-        # Trend features - slope of linear regression over rolling window (need at least 2 points)
-        if window >= 2:
+        # Trend features - focus on most predictive windows
+        if window in [2, 3, 5, 14]:  # Remove trend for 10, 21 - lower importance
             def rolling_trend(series, window):
                 def trend_slope(x):
                     if len(x) < 2:
@@ -348,18 +352,16 @@ def add_binary_rolling_means(df, binary_cols=["emailer_for_promotion", "homepage
             # Shift by 1 to avoid data leakage
             shifted = group[col].shift(1)
             
-            # Add rolling means
-            for window in binary_rolling_means_windows:
-                df_out[f"{col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
-            
-            # Add expanded rolling windows for the most important binary features
-            if col in ["emailer_for_promotion", "homepage_featured"]:
-                for window in [8, 13, 20]:  # Additional windows from test.py SHAP
+            # Add rolling means - focus on high-impact windows based on SHAP
+            high_impact_windows = [2, 3, 5, 7, 8, 13, 14, 20, 21]  # Keep only proven valuable windows
+            for window in high_impact_windows:
+                if window <= 21:  # Safety check
                     df_out[f"{col}_rolling_mean_{window}"] = shifted.rolling(window, min_periods=1).mean().reset_index(drop=True)
             
-                # Add cumulative sum of promotions in last N periods
-                for window in [4, 8, 12]:
-                    df_out[f"{col}_rolling_sum_{window}"] = shifted.rolling(window, min_periods=1).sum().reset_index(drop=True)
+            # Add rolling sums only for most important windows based on SHAP
+            important_sum_windows = [3, 4, 8, 12]  # Keep only high-value sum windows
+            for window in important_sum_windows:
+                df_out[f"{col}_rolling_sum_{window}"] = shifted.rolling(window, min_periods=1).sum().reset_index(drop=True)
     
     return df_out
 
@@ -521,8 +523,229 @@ def create_residual_features(df, model=None, is_train=True, residual_stats=None)
     
     return df_out, residual_stats
 
+def create_volatility_features(df):
+    """
+    Add features that capture prediction uncertainty patterns.
+    These features help the model learn volatility and trend patterns that would
+    be better than post-hoc adaptive adjustments.
+    """
+    df_out = df.copy()
+    group = df_out.groupby(GROUP_COLS)
+    
+    # Coefficient of variation in recent orders (only for windows that exist)
+    for window in [3, 5]:  # Only use windows that exist in ROLLING_WINDOWS
+        if f'num_orders_rolling_mean_{window}' in df_out.columns and f'num_orders_rolling_std_{window}' in df_out.columns:
+            rolling_mean = df_out[f'num_orders_rolling_mean_{window}']
+            rolling_std = df_out[f'num_orders_rolling_std_{window}']
+            df_out[f'cv_{window}'] = (rolling_std / (rolling_mean + 1e-10)).fillna(0)
+    
+    # Trend strength using linear regression slope (only for windows that exist)
+    for window in [3, 5]:  # Only use windows that exist in ROLLING_WINDOWS
+        if f'num_orders_rolling_trend_{window}' in df_out.columns:
+            # Use existing trend features and create strength indicators
+            trend_values = df_out[f'num_orders_rolling_trend_{window}'].fillna(0)
+            df_out[f'trend_strength_{window}'] = np.abs(trend_values)
+            df_out[f'trend_direction_{window}'] = np.sign(trend_values)
+    
+    # Volatility patterns - standard deviation relative to mean
+    for window in [5, 10, 14]:
+        if f'num_orders_rolling_std_{window}' in df_out.columns and f'num_orders_rolling_mean_{window}' in df_out.columns:
+            std_col = df_out[f'num_orders_rolling_std_{window}']
+            mean_col = df_out[f'num_orders_rolling_mean_{window}']
+            df_out[f'volatility_ratio_{window}'] = (std_col / (mean_col + 1e-10)).fillna(0)
+    
+    # Order consistency - how consistent are recent orders
+    for window in [3, 5]:
+        if f'num_orders_lag_1' in df_out.columns:
+            shifted = group['num_orders'].shift(1)
+            # Calculate range (max - min) over window
+            rolling_max = shifted.rolling(window, min_periods=1).max()
+            rolling_min = shifted.rolling(window, min_periods=1).min()
+            rolling_mean = shifted.rolling(window, min_periods=1).mean()
+            df_out[f'order_range_{window}'] = (rolling_max - rolling_min) / (rolling_mean + 1e-10)
+    
+    # Recent vs historical comparison
+    if 'num_orders_rolling_mean_3' in df_out.columns and 'num_orders_rolling_mean_14' in df_out.columns:
+        recent_mean = df_out['num_orders_rolling_mean_3']
+        historical_mean = df_out['num_orders_rolling_mean_14']
+        df_out['recent_vs_historical'] = (recent_mean / (historical_mean + 1e-10)).fillna(1.0)
+    
+    return df_out
+
+def create_advanced_category_features(df, is_train=True, category_stats=None):
+    """
+    Advanced category feature engineering to make categories more useful.
+    Based on SHAP analysis showing low category importance.
+    """
+    df_out = df.copy()
+    
+    if is_train:
+        category_stats = {}
+        
+        # 1. Category frequency encoding
+        for col in ['category', 'cuisine', 'center_type']:
+            if col in df_out.columns:
+                freq_map = df_out[col].value_counts(normalize=True).to_dict()
+                category_stats[f'{col}_freq'] = freq_map
+                df_out[f'{col}_frequency'] = df_out[col].map(freq_map)
+        
+        # 2. Category rank encoding (by target mean)
+        if 'num_orders' in df_out.columns:
+            for col in ['category', 'cuisine', 'center_type']:
+                if col in df_out.columns:
+                    rank_map = df_out.groupby(col)['num_orders'].mean().rank().to_dict()
+                    category_stats[f'{col}_rank'] = rank_map
+                    df_out[f'{col}_rank'] = df_out[col].map(rank_map)
+        
+        # 3. Category statistical features
+        if 'num_orders' in df_out.columns:
+            for col in ['category', 'cuisine', 'center_type']:
+                if col in df_out.columns:
+                    cat_stats = df_out.groupby(col)['num_orders'].agg([
+                        'mean', 'std', 'median', 'min', 'max', 'count'
+                    ]).to_dict()
+                    
+                    for stat in ['mean', 'std', 'median', 'min', 'max', 'count']:
+                        category_stats[f'{col}_{stat}'] = cat_stats[stat]
+                        df_out[f'{col}_{stat}_encoded'] = df_out[col].map(cat_stats[stat]).fillna(
+                            df_out['num_orders'].agg(stat) if stat != 'count' else 0
+                        )
+        
+        # 4. Category interaction with time
+        if 'num_orders' in df_out.columns and 'weekofyear' in df_out.columns:
+            for col in ['category', 'cuisine', 'center_type']:
+                if col in df_out.columns:
+                    # Seasonal patterns for each category
+                    seasonal_map = df_out.groupby([col, 'weekofyear'])['num_orders'].mean().to_dict()
+                    category_stats[f'{col}_seasonal'] = seasonal_map
+                    
+                    df_out[f'{col}_seasonal_demand'] = df_out.apply(
+                        lambda x: seasonal_map.get((x[col], x['weekofyear']), 
+                                                   df_out['num_orders'].mean()), axis=1
+                    )
+        
+        # 5. Category market share features
+        if 'num_orders' in df_out.columns:
+            total_orders = df_out['num_orders'].sum()
+            for col in ['category', 'cuisine', 'center_type']:
+                if col in df_out.columns:
+                    market_share = df_out.groupby(col)['num_orders'].sum() / total_orders
+                    category_stats[f'{col}_market_share'] = market_share.to_dict()
+                    df_out[f'{col}_market_share'] = df_out[col].map(market_share).fillna(0)
+        
+        # 6. Category volatility features
+        if 'num_orders' in df_out.columns:
+            for col in ['category', 'cuisine', 'center_type']:
+                if col in df_out.columns:
+                    volatility = df_out.groupby(col)['num_orders'].std() / df_out.groupby(col)['num_orders'].mean()
+                    category_stats[f'{col}_volatility'] = volatility.fillna(0).to_dict()
+                    df_out[f'{col}_volatility'] = df_out[col].map(volatility).fillna(0)
+    
+    else:
+        # Apply encodings using training stats
+        for col in ['category', 'cuisine', 'center_type']:
+            if col in df_out.columns:
+                # Frequency encoding
+                if f'{col}_freq' in category_stats:
+                    df_out[f'{col}_frequency'] = df_out[col].map(category_stats[f'{col}_freq']).fillna(0)
+                
+                # Rank encoding
+                if f'{col}_rank' in category_stats:
+                    df_out[f'{col}_rank'] = df_out[col].map(category_stats[f'{col}_rank']).fillna(0)
+                
+                # Statistical encodings
+                for stat in ['mean', 'std', 'median', 'min', 'max', 'count']:
+                    if f'{col}_{stat}' in category_stats:
+                        df_out[f'{col}_{stat}_encoded'] = df_out[col].map(category_stats[f'{col}_{stat}']).fillna(0)
+                
+                # Seasonal patterns
+                if f'{col}_seasonal' in category_stats and 'weekofyear' in df_out.columns:
+                    df_out[f'{col}_seasonal_demand'] = df_out.apply(
+                        lambda x: category_stats[f'{col}_seasonal'].get((x[col], x['weekofyear']), 0), axis=1
+                    )
+                
+                # Market share
+                if f'{col}_market_share' in category_stats:
+                    df_out[f'{col}_market_share'] = df_out[col].map(category_stats[f'{col}_market_share']).fillna(0)
+                
+                # Volatility
+                if f'{col}_volatility' in category_stats:
+                    df_out[f'{col}_volatility'] = df_out[col].map(category_stats[f'{col}_volatility']).fillna(0)
+    
+    return df_out, category_stats
+
+def create_category_interaction_features(df):
+    """
+    Create interaction features between categories and other high-SHAP features.
+    """
+    df_out = df.copy()
+    
+    # Category x Price interactions
+    for col in ['category', 'cuisine', 'center_type']:
+        if col in df_out.columns:
+            # Create category-specific price features
+            if 'checkout_price' in df_out.columns:
+                df_out[f'{col}_price_interaction'] = df_out[f'{col}_mean_encoded'] * df_out['checkout_price']
+            
+            if 'discount_pct' in df_out.columns:
+                df_out[f'{col}_discount_interaction'] = df_out[f'{col}_mean_encoded'] * df_out['discount_pct']
+    
+    # Category x Promotion interactions  
+    for col in ['category', 'cuisine', 'center_type']:
+        if col in df_out.columns:
+            for promo in ['emailer_for_promotion', 'homepage_featured']:
+                if promo in df_out.columns and f'{col}_mean_encoded' in df_out.columns:
+                    df_out[f'{col}_{promo}_interaction'] = df_out[f'{col}_mean_encoded'] * df_out[promo]
+    
+    # Category x Lag interactions
+    for col in ['category', 'cuisine', 'center_type']:
+        if col in df_out.columns and f'{col}_mean_encoded' in df_out.columns:
+            if 'num_orders_lag_1' in df_out.columns:
+                df_out[f'{col}_lag1_interaction'] = df_out[f'{col}_mean_encoded'] * df_out['num_orders_lag_1']
+    
+    return df_out
+
+def create_category_clustering_features(df, is_train=True, cluster_info=None):
+    """
+    Group similar categories together based on demand patterns.
+    """
+    df_out = df.copy()
+    
+    if cluster_info is None:
+        cluster_info = {}
+    
+    if is_train and 'num_orders' in df_out.columns:
+        from sklearn.cluster import KMeans
+        cluster_info = {}
+        
+        for col in ['category', 'cuisine', 'center_type']:
+            if col in df_out.columns:
+                # Create features for clustering (demand statistics)
+                cat_features = df_out.groupby(col)['num_orders'].agg([
+                    'mean', 'std', 'median', 'count'
+                ]).fillna(0)
+                
+                # Perform clustering
+                if len(cat_features) > 3:
+                    n_clusters = min(5, len(cat_features) // 2)  # Adaptive number of clusters
+                    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+                    clusters = kmeans.fit_predict(cat_features)
+                    
+                    cluster_map = dict(zip(cat_features.index, clusters))
+                    cluster_info[f'{col}_cluster'] = cluster_map
+                    df_out[f'{col}_cluster'] = df_out[col].map(cluster_map).fillna(-1)
+    
+    else:
+        # Apply clustering from training
+        for col in ['category', 'cuisine', 'center_type']:
+            if f'{col}_cluster' in cluster_info and col in df_out.columns:
+                df_out[f'{col}_cluster'] = df_out[col].map(cluster_info[f'{col}_cluster']).fillna(-1)
+    
+    return df_out, cluster_info
+
 def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_means=None, 
-                            encoding_stats=None, uncertainty_models=None, residual_stats=None, residual_model=None):
+                            encoding_stats=None, uncertainty_models=None, residual_stats=None, residual_model=None,
+                            category_stats=None, cluster_info=None, include_categorical=True):
     """Applies all feature engineering steps consistently for both train and test."""
     df_out = df.copy()
     df_out = create_temporal_features(df_out)
@@ -536,11 +759,25 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     df_out = create_interaction_features(df_out)
     df_out = create_advanced_interactions(df_out)
     
+    # Advanced categorical feature processing (ONLY if original categorical columns exist)
+    if include_categorical and any(col in df_out.columns for col in ['category', 'cuisine', 'center_type']):
+        df_out, new_category_stats = create_advanced_category_features(df_out, is_train=is_train, category_stats=category_stats)
+        if is_train:
+            category_stats = new_category_stats
+        
+        # Category interaction features
+        df_out = create_category_interaction_features(df_out)
+        
+        # Category clustering features
+        df_out, new_cluster_info = create_category_clustering_features(df_out, is_train=is_train, cluster_info=cluster_info)
+        if is_train:
+            cluster_info = new_cluster_info
+    
     # Advanced meta-learning features
     df_out, new_encoding_stats = create_target_encoding_features(df_out, is_train=is_train, encoding_stats=encoding_stats)
     if is_train:
         encoding_stats = new_encoding_stats
-    
+        
     # Uncertainty features (only if we have trained models)
     if uncertainty_models:
         df_out = create_uncertainty_features(df_out, uncertainty_models, is_train=is_train)
@@ -550,22 +787,26 @@ def apply_feature_engineering(df, is_train=True, weekofyear_means=None, month_me
     if is_train:
         residual_stats = new_residual_stats
         
+    # Volatility features
+    df_out = create_volatility_features(df_out)
+        
     if is_train:
-        return df_out, encoding_stats, residual_stats
+        return df_out, encoding_stats, residual_stats, category_stats, cluster_info
     else:
         return df_out
 
-# --- One-hot encoding and feature engineering for train/test ---
-logging.info("Applying one-hot encoding and feature engineering...")
-df_full = pd.concat([df, test], ignore_index=True)
-df_full = create_other_features(df_full)
-df_full = create_temporal_features(df_full)
-cat_cols = [col for col in ["category", "cuisine", "center_type"] if col in df_full.columns]
-if cat_cols:
-    df_full = pd.get_dummies(df_full, columns=cat_cols, dummy_na=False) # Avoid NaN columns from dummies
+# --- Feature engineering BEFORE one-hot encoding ---
+logging.info("Applying feature engineering...")
 
-train_df = df_full[df_full['week'].isin(df['week'].unique())].copy()
-test_df = df_full[df_full['week'].isin(test['week'].unique())].copy()
+# Separate train and test data for feature engineering
+train_df = df.copy()
+test_df = test.copy()
+
+# Apply basic features to both
+train_df = create_other_features(train_df)
+train_df = create_temporal_features(train_df)
+test_df = create_other_features(test_df)
+test_df = create_temporal_features(test_df)
 
 # Create simple models for uncertainty estimation
 simple_features = ['checkout_price', 'base_price', 'weekofyear']
@@ -594,8 +835,8 @@ if len(simple_features) >= 2:
     residual_model = RandomForestRegressor(n_estimators=30, max_depth=3, random_state=SEED, n_jobs=-1)
     residual_model.fit(train_df[simple_features].fillna(0), train_df['num_orders'])
 
-# First apply feature engineering to train to get seasonality means
-train_df, encoding_stats, residual_stats = apply_feature_engineering(
+# Apply full feature engineering to train data first (including advanced categorical features)
+train_df, encoding_stats, residual_stats, category_stats, cluster_info = apply_feature_engineering(
     train_df, is_train=True, uncertainty_models=uncertainty_models, residual_model=residual_model
 )
 
@@ -603,12 +844,25 @@ train_df, encoding_stats, residual_stats = apply_feature_engineering(
 weekofyear_means = train_df.groupby('weekofyear')['num_orders'].mean()
 month_means = train_df.groupby('month')['num_orders'].mean()
 
-# Now apply feature engineering to test with the seasonality means
+# Apply feature engineering to test with the seasonality means
 test_df = apply_feature_engineering(
     test_df, is_train=False, weekofyear_means=weekofyear_means, month_means=month_means,
     encoding_stats=encoding_stats, uncertainty_models=uncertainty_models, 
-    residual_stats=residual_stats, residual_model=residual_model
+    residual_stats=residual_stats, residual_model=residual_model, category_stats=category_stats,
+    cluster_info=cluster_info
 )
+
+# NOW apply one-hot encoding to both datasets (after advanced categorical features are created)
+logging.info("Applying one-hot encoding...")
+cat_cols = [col for col in ["category", "cuisine", "center_type"] if col in train_df.columns]
+if cat_cols:
+    # Combine for consistent one-hot encoding
+    df_full = pd.concat([train_df, test_df], ignore_index=True)
+    df_full = pd.get_dummies(df_full, columns=cat_cols, dummy_na=False)
+    
+    # Split back
+    train_df = df_full[df_full['week'].isin(df['week'].unique())].copy()
+    test_df = df_full[df_full['week'].isin(test['week'].unique())].copy()
 
 # Drop rows in train_df where target is NA (if any, though unlikely from problem desc)
 train_df = train_df.dropna(subset=['num_orders']).reset_index(drop=True)
@@ -637,15 +891,18 @@ FEATURES = [
 # Add lag features
 FEATURES += [f"{TARGET}_lag_{lag}" for lag in LAG_WEEKS if f"{TARGET}_lag_{lag}" in train_df.columns]
 
-# Add rolling statistics
+# Add rolling statistics - focus on high-impact features based on SHAP
 FEATURES += [f"{TARGET}_rolling_mean_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_mean_{w}" in train_df.columns]
-FEATURES += [f"{TARGET}_rolling_std_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_std_{w}" in train_df.columns]
+# Only add std for most important windows - others have low SHAP importance
+FEATURES += [f"{TARGET}_rolling_std_{w}" for w in [2, 3, 5, 10] if f"{TARGET}_rolling_std_{w}" in train_df.columns]
 
-# Add binary rolling means with expanded windows
+# Add binary rolling means with focused windows based on SHAP importance
 for col in ["emailer_for_promotion", "homepage_featured"]:
-    FEATURES += [f"{col}_rolling_mean_{w}" for w in [2, 3, 5, 7, 8, 13, 14, 20, 21] if f"{col}_rolling_mean_{w}" in train_df.columns]
+    # Only include windows that show meaningful SHAP importance
+    important_windows = [2, 3, 5, 7, 8, 13, 14, 20, 21]
+    FEATURES += [f"{col}_rolling_mean_{w}" for w in important_windows if f"{col}_rolling_mean_{w}" in train_df.columns]
 
-# Add promo rolling sums
+# Add promo rolling sums - keep only high-impact windows
 FEATURES += [f"{col}_rolling_sum_{w}" for col in OTHER_ROLLING_SUM_COLS for w in [3, 4, 8, 12] if f"{col}_rolling_sum_{w}" in train_df.columns]
 
 # Add all interaction features
@@ -683,10 +940,10 @@ FEATURES += [f"{TARGET}_exp_lag_{lag}" for lag in EXP_DECAY_LAGS if f"{TARGET}_e
 # Add exponential moving averages  
 FEATURES += [f"{TARGET}_exp_ma_{w}" for w in [3, 5, 7, 10] if f"{TARGET}_exp_ma_{w}" in train_df.columns]
 
-# Add advanced rolling statistics
-FEATURES += [f"{TARGET}_rolling_median_{w}" for w in ROLLING_WINDOWS if f"{TARGET}_rolling_median_{w}" in train_df.columns]
-FEATURES += [f"{TARGET}_rolling_skew_{w}" for w in ROLLING_WINDOWS if w >= 3 and f"{TARGET}_rolling_skew_{w}" in train_df.columns]
-FEATURES += [f"{TARGET}_rolling_trend_{w}" for w in ROLLING_WINDOWS if w >= 2 and f"{TARGET}_rolling_trend_{w}" in train_df.columns]
+# Add advanced rolling statistics - focus on highest-impact ones based on SHAP
+FEATURES += [f"{TARGET}_rolling_median_{w}" for w in [5, 10, 14] if f"{TARGET}_rolling_median_{w}" in train_df.columns]  # Remove low-impact windows
+FEATURES += [f"{TARGET}_rolling_skew_{w}" for w in [5, 10] if f"{TARGET}_rolling_skew_{w}" in train_df.columns]  # Most skew features have low importance
+FEATURES += [f"{TARGET}_rolling_trend_{w}" for w in [2, 3, 5, 14] if f"{TARGET}_rolling_trend_{w}" in train_df.columns]  # Remove lower-impact trend windows
 
 # Add target encoding features
 FEATURES += [col for col in train_df.columns if col.endswith('_target_encoded')]
@@ -696,6 +953,20 @@ FEATURES += [col for col in train_df.columns if col.startswith('prediction_') or
 
 # Add residual correction features
 FEATURES += [col for col in train_df.columns if col.startswith('residual_correction_')]
+
+# Add volatility and trend pattern features
+FEATURES += [col for col in train_df.columns if any(col.startswith(prefix) for prefix in ['cv_', 'trend_strength_', 'trend_direction_', 'volatility_ratio_', 'order_range_', 'recent_vs_historical'])]
+
+# Add new advanced categorical features
+FEATURES += [col for col in train_df.columns if any(col.endswith(suffix) for suffix in [
+    '_frequency', '_rank', '_volatility', '_market_share', '_seasonal_demand'
+]) or any(col.endswith(suffix) for suffix in [
+    '_mean_encoded', '_std_encoded', '_median_encoded', '_min_encoded', '_max_encoded', '_count_encoded'
+]) or any(col.endswith(suffix) for suffix in [
+    '_price_interaction', '_discount_interaction', '_emailer_for_promotion_interaction', '_homepage_featured_interaction', '_lag1_interaction'
+]) or any(col.endswith(suffix) for suffix in [
+    '_cluster'
+])]
 
 # Filter out any features that don't exist or are target/id
 FEATURES = [f for f in FEATURES if f in train_df.columns and f != TARGET and f != 'id']
@@ -1114,9 +1385,8 @@ def adaptive_prediction_adjustment(base_prediction, features, trend_features=Non
 for week_num in test_weeks:
     logging.info(f"Predicting for week {week_num}...")
     # Identify rows for the current week to predict
-    current_week_mask = history_df['week'] == week_num
-
-    # Re-apply feature engineering for the current state with seasonality means
+    current_week_mask = history_df['week'] == week_num    # Re-apply feature engineering for the current state with seasonality means
+    # EXCLUDE categorical features during recursive prediction since they should already be computed
     history_df_updated = apply_feature_engineering(
         history_df, is_train=False, 
         weekofyear_means=weekofyear_means, 
@@ -1124,7 +1394,10 @@ for week_num in test_weeks:
         encoding_stats=encoding_stats,
         uncertainty_models=uncertainty_models,
         residual_stats=residual_stats,
-        residual_model=residual_model
+        residual_model=residual_model,
+        category_stats=category_stats,
+        cluster_info=cluster_info,
+        include_categorical=False  # CRITICAL: Don't try to create categorical features during recursive prediction
     )
     
     # Update history_df with new features
